@@ -90,9 +90,17 @@ internal class AndroidOutboundPinger : OutboundPinger {
     override suspend fun ping(outbound: OutboundState): Long {
         val host = outbound.pingHostOrNull() ?: return FailedPingMillis
         val port = outbound.pingPortOrNull()
-        var bestMillis = FailedPingMillis
 
-        // 1. Try ICMP ping first
+        // 1. Prefer real TCP connect test if port is known (accurately reflects proxy port reachability)
+        if (port != null) {
+            val tcpElapsed = tcpPingOnce(host, port)
+            if (tcpElapsed >= 0L) {
+                return tcpElapsed
+            }
+        }
+
+        // 2. Fallback to ICMP ping
+        var bestMillis = FailedPingMillis
         repeat(PingAttempts) {
             currentCoroutineContext().ensureActive()
             val elapsedMillis = pingOnce(host)
@@ -100,15 +108,6 @@ internal class AndroidOutboundPinger : OutboundPinger {
                 bestMillis = elapsedMillis
             }
         }
-
-        // 2. If ICMP ping failed or was blocked, fallback to real TCP socket handshake
-        if (bestMillis < 0L && port != null) {
-            val tcpElapsed = tcpPingOnce(host, port)
-            if (tcpElapsed >= 0L) {
-                bestMillis = tcpElapsed
-            }
-        }
-
         return bestMillis
     }
 

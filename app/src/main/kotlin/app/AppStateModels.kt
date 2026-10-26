@@ -134,10 +134,10 @@ const val DefaultSingBoxUrlTestIdleTimeout = "30m"
 // Global connection-test preferences used by the delay test, and as the
 // url_test fallback when a group has no URL of its own. Mirrors the husi
 // `connectionTest*` settings.
-const val DefaultConnectionTestUrl = "http://cp.cloudflare.com/"
+const val DefaultConnectionTestUrl = "https://www.gstatic.com/generate_204"
 const val DefaultConnectionTestConcurrent = 5
 const val DefaultConnectionTestTimeoutMillis = 5000
-const val DefaultConnectionTestUnifiedDelay = true
+const val DefaultConnectionTestUnifiedDelay = false
 const val DefaultConnectionTestIgnoreHandshakeTime = false
 
 data class ConnectionTestIntBounds(val min: Int, val max: Int)
