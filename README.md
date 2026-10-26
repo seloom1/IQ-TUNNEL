@@ -1,118 +1,75 @@
-English | [简体中文](README_zh_CN.md)
+# IQ TUNNEL (VIP PROTOCOLS)
 
-# AsteriskBOX
+<div dir="rtl" align="center">
 
-Android sing-box GUI client.
+**تطبيق أندرويد متقدم وعالي الأداء لتشغيل وإدارة بروكسيات وبروتوكولات الـ VPN الحديثة المبنية على نواة sing-box.**
 
-## Telegram Channel
+[![Telegram Channel](https://img.shields.io/badge/Telegram-Channel-2CA5E0?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/FREEVPSIRAQ)
+[![Developer](https://img.shields.io/badge/Developer-@SELOOM1-0088cc?style=for-the-badge&logo=telegram&logoColor=white)](https://t.me/SELOOM1)
 
-[Asterisk4Magisk](https://t.me/Asterisk4Magisk)
+</div>
 
-## Run Modes
+---
 
-### VPN Service
+## 🌐 قنوات الدعم والتحديثات (Official Channels)
 
-- Works without root permission.
-- Uses Android `VpnService`.
+- 📢 **قناة التحديثات الرسمية**: [@FREEVPSIRAQ](https://t.me/FREEVPSIRAQ)
+- 👨‍💻 **المطور الرسمي**: [@SELOOM1](https://t.me/SELOOM1)
 
-### TPROXY(ROOT)
+---
 
-- Runs the local sing-box executable directly with libsu.
-- Uses iptables and policy routing for transparent proxy traffic.
+## ⚡ مميزات التطبيق (Features)
 
-### TUN(ROOT)
+- 🚀 **واجهة سايبر حديثة وسريعة (Cyber Reactor UI)**: تصميم عصري وجذاب ومحسن لسرعة الاستجابة وفتح التطبيق الفوري.
+- 📡 **مراقبة حية ودقيقة لنشاط الشبكة**: رسم بياني متدفق يعكس سرعات الرفع والتحميل الفعلية لحظة بلحظة.
+- ⏱️ **قياس استجابة حقيقي (Real Server Ping)**: فحص دوري ذكي لزمن استجابة السيرفر المتصل فعلياً.
+- 🔄 **تبديل فوري للسيرفر أثناء الاتصال**: إمكانية تغيير السيرفر والبروكسي بدون انقطاع أو الحاجة لإعادة تشغيل الخدمة.
+- 📸 **التقاط الشاشة الافتراضي (Screenshots Allowed)**: مفعّل افتراضياً لسهولة مشاركة الإعدادات وحل المشاكل.
+- 🔋 **بدون إزعاج إذن البطارية**: طلب الإذن يظهر مرة واحدة فقط عند التثبيت لأول مرة.
+- 🌐 **دعم كامل للغة العربية والإنجليزية**: تبديل مباشر وسلس للغة من داخل إعدادات التطبيق.
+- 🛡️ **دعم كافة البروتوكولات المتقدمة**: VLESS, VMess, Trojan, ShadowTLS, Shadowsocks, WireGuard وغيرها.
 
-- Runs the local sing-box executable directly with libsu.
-- Uses `auto_route` and `auto_redirect` in the sing-box TUN inbound to manage routing.
+---
 
-### eBPF(ROOT)
+## 🛠️ أنماط التشغيل (Run Modes)
 
-- Runs the local sing-box executable directly with libsu.
-- Uses the sing-box eBPF inbound to capture traffic.
-- Availability depends on eBPF support in the device kernel.
+### 1. وضع الـ VPN العادي (VPN Service - No Root)
+- يعمل على جميع أجهزة أندرويد بدون الحاجة لصلاحيات الروت.
+- يعتمد على معمارية `VpnService` الرسمية لنظام أندرويد بتشفير وأداء فائق.
 
-### TUN2SOCKS(ROOT)
+### 2. أوضاع الروت المتقدمة (ROOT Modes)
+- **TPROXY**: توجيه شفاف فائق السرعة عبر `iptables` و `Policy Routing`.
+- **TUN / TUN2SOCKS**: إنشاء منفذ شبكة محلي وتوجيه الحزم بكفاءة عالية.
+- **eBPF / BPF2SOCKS**: اعتراض حزم البيانات مباشرة على مستوى نواة لينكس (Kernel-level) للأجهزة الداعمة لتقنية eBPF.
 
-- Runs the local sing-box executable directly with libsu.
-- Uses `hev-socks5-tunnel` to create a TUN device and send traffic to the sing-box SOCKS5 inbound.
+---
 
-### BPF2SOCKS(ROOT)
+## 📦 التثبيت والبناء (Build from Source)
 
-- Runs the local sing-box executable directly with libsu.
-- Uses `bpf2socks` to capture traffic and send it to the sing-box SOCKS5 inbound.
-- Availability depends on eBPF support in the device kernel.
+### متطلبات البناء:
+- JDK 17 أو 21
+- Android SDK و NDK
 
-### asteriskd
+### أوامر البناء عبر سطر الأوامر:
 
-- Watches local IPv4/IPv6 addresses and tethering interfaces, then refreshes the relevant iptables rules or BPF maps.
-- Cleans up networking rules owned by the active ROOT mode when the service stops.
-
-## Enhancement Module
-
-[AsteriskEnhance](https://github.com/Asterisk4Magisk/AsteriskEnhance) is an optional module that routes system DNS according to the application list and isolates resolver caches. It requires ROOT and Zygisk Next and supports TPROXY, TUN2SOCKS, and BPF2SOCKS. Enable **Application list enhancement** in settings and follow the installation prompts; reboot after installation or updates.
-
-## Resource Files
-
-- Resource files are stored in the app-private `files/sing-box` directory.
-- Custom resources can be added or replaced locally and updated from configured URLs.
-
-## Broadcast Control
-
-Enable **Broadcast Control** in settings, then send an explicit broadcast to the receiver below. Actions use the `org.asterisk.zcc.abox.action.` prefix.
-
-| Operation | Action suffix |
-| --- | --- |
-| Start proxy | `PROXY_START` |
-| Stop proxy | `PROXY_STOP` |
-| Toggle proxy | `PROXY_TOGGLE` |
-| Update all URL subscriptions | `SUBSCRIPTION_UPDATE` |
-| Cancel broadcast subscription update | `SUBSCRIPTION_UPDATE_CANCEL` |
-| Update all resources | `RESOURCE_UPDATE` |
-| Cancel resource updates | `RESOURCE_UPDATE_CANCEL` |
-
-```sh
-adb shell am broadcast -n org.asterisk.zcc.abox/features.automation.BroadcastControlReceiver -a org.asterisk.zcc.abox.action.SUBSCRIPTION_UPDATE
-```
-
-Subscription updates skip local entries; cancellation preserves completed results and scheduled update settings. Resources use the current Resource Management configuration; resource cancellation also clears its shared queue. Repeated update commands of the same kind are merged while running.
-
-Updates run in the background without starting the proxy. Broadcast delivery does not mean the update has finished; check the `BroadcastControl` app logs for results.
-
-## Development
-
-Initialize submodules before building:
-
-```bash
-git submodule update --init --recursive
-```
-
-Build with Android Studio or the Gradle wrapper:
-
+على نظام **Windows (PowerShell)**:
 ```powershell
 .\gradlew.bat assembleDebug
 ```
 
-On macOS or Linux:
-
+على أنظمة **macOS / Linux**:
 ```bash
 ./gradlew assembleDebug
 ```
 
-The build downloads the pinned AndroidLibBoxLite AAR, builds the native submodules, and produces ABI split APKs plus a universal APK.
+ستجد ملفات الـ APK الناتجة داخل المجلد:
+`app/build/outputs/apk/debug/` أو داخل `apk_builds/`.
 
-If Gradle cannot find the Android NDK, configure it through Android Studio, `ndk.dir` in `local.properties`, or `ANDROID_NDK_HOME`.
+---
 
-## License
+## 📜 الترخيص والحقوق (License & Credits)
 
-[GPL-3.0](LICENSE)
-
-## Credits
-
-- [@SagerNet/sing-box](https://github.com/SagerNet/sing-box)
-- [@reF1nd/sing-box-releases](https://github.com/reF1nd/sing-box-releases)
-- [@Asterisk4Magisk/AndroidLibBoxLite](https://github.com/Asterisk4Magisk/AndroidLibBoxLite)
-- [@heiher/hev-socks5-tunnel](https://github.com/heiher/hev-socks5-tunnel)
-- [@topjohnwu/libsu](https://github.com/topjohnwu/libsu)
-- [@android/material3](https://developer.android.com/develop/ui/compose/designsystems/material3)
-- [@mayaxcn/china-ip-list](https://github.com/mayaxcn/china-ip-list)
-- [@xchacha20-poly1305/husi](https://github.com/xchacha20-poly1305/husi)
+- تم التطوير والإشراف بواسطة: **[SELOOM1](https://t.me/SELOOM1)**
+- قناة التحديثات: **[FREEVPSIRAQ](https://t.me/FREEVPSIRAQ)**
+- يعتمد التطبيق على نواة: [sing-box](https://github.com/SagerNet/sing-box)
+- الترخيص البرمجي: [GPL-3.0 License](LICENSE)
