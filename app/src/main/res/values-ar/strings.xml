@@ -1,6 +1,6 @@
-<?xml version="1.0" encoding="utf-8"?>
+<?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <!-- Common -->
+    
     <string name="app_name">IQ TUNNEL</string>
     <string name="common_add">إضافة</string>
     <string name="common_all">الكل</string>
@@ -9,36 +9,22 @@
     <string name="common_cancel">إلغاء</string>
     <string name="common_clear">مسح</string>
     <string name="common_close">إغلاق</string>
-    <string name="common_confirm">تأكيد</string>
     <string name="common_copy">نسخ</string>
     <string name="common_delete">حذف</string>
-    <string name="common_disable">تعطيل</string>
     <string name="common_edit">تعديل</string>
-    <string name="common_enable">تفعيل</string>
-    <string name="common_error">خطأ</string>
-    <string name="common_export">تصدير</string>
-    <string name="common_import">استيراد</string>
-    <string name="common_info">معلومات</string>
-    <string name="common_loading">جاري التحميل...</string>
     <string name="common_more">المزيد</string>
-    <string name="common_name">الاسم</string>
-    <string name="common_no">لا</string>
-    <string name="common_none">لا يوجد</string>
     <string name="common_ok">حسناً</string>
-    <string name="common_paste">لصق</string>
-    <string name="common_refresh">تحديث</string>
-    <string name="common_remove">إزالة</string>
     <string name="common_share">مشاركة</string>
     <string name="common_unknown">غير معروف</string>
     <string name="common_update">تحديث</string>
 
-    <!-- Navigation -->
+    
     <string name="nav_dashboard">الرئيسية</string>
     <string name="nav_groups">المجموعات</string>
     <string name="nav_proxies">الخوادم</string>
     <string name="nav_settings">الإعدادات</string>
 
-    <!-- Home -->
+    
     <string name="home_accumulated_download">إجمالي التحميل</string>
     <string name="home_accumulated_upload">إجمالي الرفع</string>
     <string name="home_mode_change_failed">فشل تغيير وضع التشغيل</string>
@@ -65,7 +51,7 @@
     <string name="sing_box_mode_global">شامل</string>
     <string name="sing_box_mode_rule">قواعد</string>
 
-    <!-- Appearance and language -->
+    
     <string name="option_dark">الوضع الداكن</string>
     <string name="option_english">English</string>
     <string name="option_follow_system">تلقائي (حسب النظام)</string>
@@ -78,7 +64,7 @@
     <string name="settings_privacy">الخصوصية</string>
     <string name="settings_theme_color">لون التمييز</string>
 
-    <!-- Settings Sections -->
+    
     <string name="settings_title">الإعدادات</string>
     <string name="settings_advanced">متقدم</string>
     <string name="settings_core">النواة</string>
@@ -98,7 +84,7 @@
     <string name="settings_about_project">معلومات المشروع</string>
     <string name="settings_open_source_licenses">تراخيص المصادر المفتوحة</string>
 
-    <!-- Run modes -->
+    
     <string name="settings_run_mode_vpn_service">خدمة VPN</string>
     <string name="settings_run_mode_tproxy">TProxy</string>
     <string name="settings_run_mode_tun">TUN</string>
@@ -106,14 +92,14 @@
     <string name="settings_run_mode_tun2socks">Tun2Socks</string>
     <string name="settings_run_mode_bpf2socks">Bpf2Socks</string>
 
-    <!-- About -->
+    
     <string name="about_title">حول IQ TUNNEL</string>
     <string name="about_runtime">بيئة التشغيل</string>
     <string name="about_other">روابط الدعم والمطور</string>
     <string name="about_view_source">قناة التلجرام الرسمية</string>
     <string name="about_join_telegram">التواصل مع المطور</string>
 
-    <!-- Proxy App List & Exclusion -->
+    
     <string name="proxy_app_list_title">استثناء وتوجيه التطبيقات</string>
     <string name="proxy_app_list_mode_global">جميع التطبيقات (شامل)</string>
     <string name="proxy_app_list_mode_blacklist">القائمة السوداء (استثناء من النفق)</string>
@@ -147,10 +133,9 @@
     <string name="proxy_app_list_scan_china_skipped_global">تم التخطي في وضع جميع التطبيقات</string>
     <string name="proxy_app_list_load_failed">تعذر تحميل قائمة التطبيقات</string>
     <string name="proxy_app_list_more_actions">خيارات إضافية</string>
-    <string name="settings_app_management">استثناء وتوجيه التطبيقات (Proxy App List)</string>
     <string name="settings_app_management_summary">تحديد التطبيقات المستثناة من البروكسي أو التي تعمل فقط من خلاله</string>
 
-    <!-- Errors -->
+    
     <string name="error_vpn_permission_launcher_missing">تعذر طلب إذن VPN على هذا الجهاز</string>
     <string name="error_qr_camera_permission_denied">تم رفض إذن الكاميرا لمسح رمز QR</string>
     <string name="error_qr_scan_launcher_missing">تطبيق مسح الرموز غير متوفر</string>
@@ -158,7 +143,7 @@
     <string name="error_log_export_launcher_missing">تعذر تصدير السجل</string>
     <string name="error_backup_file_creator_missing">تعذر إنشاء ملف النسخ الاحتياطي</string>
 
-    <!-- SingBox Proxies Screen -->
+    
     <string name="sing_box_proxies_title">البروكسيات</string>
     <string name="sing_box_proxies_search">البحث في البروكسيات</string>
     <string name="sing_box_proxies_runtime_unavailable">نواة sing-box غير جاهزة</string>
@@ -184,21 +169,11 @@
     <string name="sing_box_proxies_service_stopped_title">خدمة البروكسي متوقفة</string>
     <string name="sing_box_proxies_service_stopped_summary">قم بتشغيل الخدمة من الواجهة الرئيسية لعرض محددات البروكسي.</string>
 
-    <!-- Outbounds & Groups -->
-    <string name="outbound_management_title">إدارة السيرفرات</string>
-    <string name="outbound_groups_title">مجموعات السيرفرات</string>
-    <string name="outbound_add">إضافة سيرفر</string>
+    
     <string name="outbound_group_add">إضافة مجموعة</string>
     <string name="outbound_empty">لا توجد سيرفرات مضافة</string>
-    <string name="outbound_groups_empty">لا توجد مجموعات</string>
     <string name="outbound_delete_title">حذف السيرفر؟</string>
     <string name="outbound_delete_message">سيتم حذف "%1$s" نهائياً.</string>
-    <string name="outbound_type">نوع السيرفر</string>
-    <string name="outbound_tag">اسم السيرفر / المعرف</string>
-    <string name="outbound_server">عنوان الخادم (Server)</string>
-    <string name="outbound_server_port">المنفذ (Port)</string>
-
-    <!-- Routing -->
     <string name="routing_title">إدارة التوجيه والقواعد</string>
     <string name="routing_add_rule">إضافة قاعدة توجيه</string>
     <string name="routing_global">المحدد الشامل (Global)</string>
@@ -206,35 +181,14 @@
     <string name="routing_empty">لا توجد قواعد توجيه</string>
     <string name="routing_rule_type">نوع القاعدة</string>
 
-    <!-- DNS -->
+    
     <string name="dns_management_title">إدارة خوادم DNS</string>
-    <string name="dns_add_server">إضافة خادم DNS</string>
-    <string name="dns_rules">قواعد DNS</string>
-    <string name="dns_empty">لا توجد خوادم DNS مخصصة</string>
-
-    <!-- Settings Additional -->
-    <string name="settings_system">النظام</string>
-    <string name="settings_network">الشبكة</string>
-    <string name="settings_connection_test">فحص الاتصال</string>
-    <string name="settings_connection_test_url">رابط فحص الاتصال</string>
-    <string name="settings_connection_test_timeout">مهلة الفحص</string>
-    <string name="settings_clear_cache">مسح التخزين المؤقت</string>
-    <string name="settings_reset_all">إعادة ضبط الكل</string>
-    <string name="settings_backup_and_restore">النسخ الاحتياطي والاستعادة</string>
-    <string name="settings_backup">إنشاء نسخة احتياطية</string>
-    <string name="settings_restore">استعادة نسخة احتياطية</string>
-    <string name="settings_log_export">تصدير السجلات</string>
-    <string name="settings_log_clear">مسح السجلات</string>
-
-    <!-- Common additions -->
     <string name="common_search">بحث</string>
     <string name="common_save">حفظ</string>
     <string name="common_retry">إعادة المحاولة</string>
     <string name="common_restore">استعادة</string>
     <string name="common_replace">استبدال</string>
     <string name="common_copied">تم النسخ</string>
-    <string name="common_failed">فشل</string>
-    <string name="common_success">نجاح</string>
     <string name="common_unavailable">غير متوفر</string>
 
 </resources>

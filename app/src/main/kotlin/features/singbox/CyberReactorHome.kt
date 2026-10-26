@@ -168,8 +168,15 @@ internal fun resolveActiveServerInfo(
         ?: "PROXY"
     val protocolBadge = rawType.displaySingBoxProtocolName(compact = true)
 
-    val delayMs: Int? = activeOutbound?.id?.let { pingState.entries[it]?.latencyMillis?.toInt() }?.takeIf { it > 0 }
-        ?: activeNode?.delay?.takeIf { it > 0 }
+    val realCoreDelay = activeNode?.delay?.takeIf { it > 0 }
+    val directOutboundDelay = activeOutbound?.id?.let { pingState.entries[it]?.latencyMillis?.toInt() }?.takeIf { it > 0 }
+
+    // When VPN is connected, realCoreDelay reflects true end-to-end proxy tunnel latency from sing-box
+    val delayMs: Int? = if (appState.proxyRunning) {
+        realCoreDelay ?: directOutboundDelay
+    } else {
+        directOutboundDelay ?: realCoreDelay
+    }
 
     return ActiveServerInfo(
         tag = effectiveTag.orEmpty(),
@@ -328,17 +335,24 @@ internal fun CyberReactorPowerButton(
     val isRunning = appState.proxyRunning
     val isBusy = control.busy
 
-    // Auto-ping active server when connected (continuously refreshed every 8 seconds)
+    // Auto-ping active server when connected (continuously refreshed every 6 seconds)
     LaunchedEffect(isRunning, activeServer.outbound?.id, activeServer.tag) {
         if (isRunning) {
+            // Immediate measurement upon connection
+            if (activeServer.tag.isNotBlank()) {
+                runCatching { services.singBoxRuntime.testProxyDelay(appState, activeServer.tag) }
+            }
+            if (activeServer.outbound != null) {
+                services.outboundPingRuntime.start(listOf(activeServer.outbound), supersede = true)
+            }
             while (kotlinx.coroutines.currentCoroutineContext()[kotlinx.coroutines.Job]?.isActive != false) {
-                if (activeServer.outbound != null) {
-                    services.outboundPingRuntime.start(listOf(activeServer.outbound), supersede = true)
-                }
+                kotlinx.coroutines.delay(6000L)
                 if (activeServer.tag.isNotBlank()) {
                     runCatching { services.singBoxRuntime.testProxyDelay(appState, activeServer.tag) }
                 }
-                kotlinx.coroutines.delay(8000L)
+                if (activeServer.outbound != null) {
+                    services.outboundPingRuntime.start(listOf(activeServer.outbound), supersede = true)
+                }
             }
         }
     }
