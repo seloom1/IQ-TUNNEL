@@ -37,7 +37,7 @@ data class AppState(
     val languageMode: Int = LanguageModeSystem,
     val seedIndex: Int = 0,
     val hideRecentTasks: Boolean = false,
-    val allowScreenshots: Boolean = false,
+    val allowScreenshots: Boolean = true,
     val hideLauncherIcon: Boolean = false,
     val autoHideNavigationBar: Boolean = false,
 

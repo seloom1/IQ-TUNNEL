@@ -201,18 +201,20 @@ class AsteriskApplication : Application(), SingletonImageLoader.Factory {
 
     override fun onCreate() {
         super.onCreate()
-        appScope.launch {
+        appScope.launch(Dispatchers.IO) {
             val scheduler = ResourceAutoUpdateScheduler(applicationContext)
             stateStore.state
                 .map { state -> resourceAutoUpdateIntervalMillis(state.enableResourceAutoUpdate, state.resourceAutoUpdateInterval) }
                 .distinctUntilChanged()
                 .collect(scheduler::reconcile)
         }
-        AndroidLibboxRuntime.setup(this)
-        AndroidLogcatRepository.initialize(applicationContext)
-        AndroidCoreLogRepository.initialize(applicationContext)
-        AndroidAsteriskdLogRepository.initialize(applicationContext)
-        appScope.launch {
+        appScope.launch(Dispatchers.IO) {
+            AndroidLibboxRuntime.setup(this@AsteriskApplication)
+            AndroidLogcatRepository.initialize(applicationContext)
+            AndroidCoreLogRepository.initialize(applicationContext)
+            AndroidAsteriskdLogRepository.initialize(applicationContext)
+        }
+        appScope.launch(Dispatchers.IO) {
             stateStore.state
                 .map { state ->
                     state.outboundGroups.map { group ->
