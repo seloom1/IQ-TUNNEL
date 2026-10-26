@@ -141,16 +141,29 @@ internal fun resolveActiveServerInfo(
     val globalGroup = runtimeState.proxies.groups.firstOrNull { it.name == APP_GLOBAL_SELECTOR }
         ?: runtimeState.proxies.groups.firstOrNull()
 
-    var effectiveTag = globalGroup?.now?.takeIf(String::isNotBlank)
-        ?: appState.selectorSelections[APP_GLOBAL_SELECTOR]
-        ?: appState.selectorSelections.values.firstOrNull()
+    // Prioritize user's saved selectorSelection if service is not running, or fallback cleanly
+    var effectiveTag = if (appState.proxyRunning) {
+        globalGroup?.now?.takeIf(String::isNotBlank)
+            ?: appState.selectorSelections[APP_GLOBAL_SELECTOR]
+            ?: appState.selectorSelections.values.firstOrNull()
+    } else {
+        appState.selectorSelections[APP_GLOBAL_SELECTOR]
+            ?: globalGroup?.now?.takeIf(String::isNotBlank)
+            ?: appState.selectorSelections.values.firstOrNull()
+    }
 
     // If effectiveTag is a group selector (e.g. outbound_group:1:Default), resolve the server selected inside that group
     if (effectiveTag != null && effectiveTag.startsWith("outbound_group:")) {
         val subGroup = runtimeState.proxies.groups.firstOrNull { it.name == effectiveTag }
-        effectiveTag = subGroup?.now?.takeIf(String::isNotBlank)
-            ?: appState.selectorSelections[effectiveTag]
-            ?: effectiveTag
+        effectiveTag = if (appState.proxyRunning) {
+            subGroup?.now?.takeIf(String::isNotBlank)
+                ?: appState.selectorSelections[effectiveTag]
+                ?: effectiveTag
+        } else {
+            appState.selectorSelections[effectiveTag]
+                ?: subGroup?.now?.takeIf(String::isNotBlank)
+                ?: effectiveTag
+        }
     }
 
     val activeOutbound = appState.outbounds.firstOrNull {
@@ -911,6 +924,13 @@ internal fun CyberServerSelectorCard(
                                         runCatching { services.singBoxRuntime.testProxyDelay(appState, targetTag) }
                                     }
                                 }
+                            } else {
+                                // Trigger ping test when selecting while disconnected
+                                services.outboundPingRuntime.start(listOf(outbound), supersede = true)
+                            }
+                            val displayName = outbound.remarks.ifBlank { outbound.type }
+                            scope.launch {
+                                services.tipNotifier.show("تم تحديد الخادم: $displayName ⚡")
                             }
                             showServerPicker = false
                         },
