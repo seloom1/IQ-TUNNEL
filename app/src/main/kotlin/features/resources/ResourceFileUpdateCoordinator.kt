@@ -1,0 +1,277 @@
+// Copyright 2026, AsteriskBOX contributors
+// SPDX-License-Identifier: GPL-3.0
+
+package features.resources
+
+import app.CustomResourceFileState
+import app.ResourceFileKind
+import app.ResourceFileUpdateSource
+import app.ResourceFilesStatus
+import app.urlFor
+import features.resources.runtime.AndroidResourceFileDownloadCancelledException
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.supervisorScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.CoroutineStart
+import kotlinx.coroutines.async
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.launch
+
+internal sealed interface ResourceFileUpdateTarget {
+    data class BuiltIn(val kind: ResourceFileKind) : ResourceFileUpdateTarget
+
+    data class Custom(val id: Int) : ResourceFileUpdateTarget
+}
+
+internal sealed interface ResourceFileUpdateRequest {
+    val targets: Set<ResourceFileUpdateTarget>
+
+    class BuiltIn(
+        val kind: ResourceFileKind,
+        val source: ResourceFileUpdateSource,
+        val options: ResourceFileUpdateOptions,
+        customResourceFiles: List<CustomResourceFileState>,
+    ) : ResourceFileUpdateRequest {
+        val customResourceFiles = customResourceFiles.toList()
+        override val targets = setOf(ResourceFileUpdateTarget.BuiltIn(kind))
+    }
+
+    class Custom(
+        val file: CustomResourceFileState,
+        val options: ResourceFileUpdateOptions,
+        customResourceFiles: List<CustomResourceFileState>,
+    ) : ResourceFileUpdateRequest {
+        val customResourceFiles = customResourceFiles.toList()
+        override val targets = setOf(ResourceFileUpdateTarget.Custom(file.id))
+    }
+
+    class CustomBatch(
+        files: List<CustomResourceFileState>,
+        val options: ResourceFileUpdateOptions,
+        customResourceFiles: List<CustomResourceFileState>,
+    ) : ResourceFileUpdateRequest {
+        val files = files.toList()
+        val customResourceFiles = customResourceFiles.toList()
+        override val targets = this.files
+            .mapTo(linkedSetOf()) { file -> ResourceFileUpdateTarget.Custom(file.id) }
+    }
+
+    class All(
+        val source: ResourceFileUpdateSource,
+        val options: ResourceFileUpdateOptions,
+        customResourceFiles: List<CustomResourceFileState>,
+    ) : ResourceFileUpdateRequest {
+        val customResourceFiles = customResourceFiles.toList()
+        override val targets: Set<ResourceFileUpdateTarget> = buildSet {
+            ResourceFileKind.entries.forEach { kind ->
+                if (!source.urlFor(kind).isNullOrBlank()) {
+                    add(ResourceFileUpdateTarget.BuiltIn(kind))
+                }
+            }
+            this@All.customResourceFiles.forEach { customFile ->
+                if (customFile.url.isNotBlank()) {
+                    add(ResourceFileUpdateTarget.Custom(customFile.id))
+                }
+            }
+        }
+    }
+}
+
+internal data class ResourceFileUpdateQueueEntry(
+    val id: Long,
+    val request: ResourceFileUpdateRequest,
+)
+
+internal enum class ResourceFileUpdateDisplayState {
+    Idle,
+    Queued,
+    Running,
+}
+
+internal data class ResourceFileUpdateQueueState(
+    val running: ResourceFileUpdateQueueEntry? = null,
+    val pending: List<ResourceFileUpdateQueueEntry> = emptyList(),
+    val completionRevision: Long = 0,
+)
+
+internal val ResourceFileUpdateQueueState.isBusy: Boolean
+    get() = running != null || pending.isNotEmpty()
+
+internal fun ResourceFileUpdateQueueState.displayStateOf(
+    target: ResourceFileUpdateTarget,
+): ResourceFileUpdateDisplayState {
+    return when {
+        target in running?.request?.targets.orEmpty() -> ResourceFileUpdateDisplayState.Running
+        pending.any { entry -> target in entry.request.targets } -> ResourceFileUpdateDisplayState.Queued
+        else -> ResourceFileUpdateDisplayState.Idle
+    }
+}
+
+internal sealed interface ResourceFileUpdateResult {
+    val entry: ResourceFileUpdateQueueEntry
+    val request: ResourceFileUpdateRequest
+        get() = entry.request
+
+    data class Success(
+        override val entry: ResourceFileUpdateQueueEntry,
+    ) : ResourceFileUpdateResult
+
+    data class Failure(
+        override val entry: ResourceFileUpdateQueueEntry,
+        val error: Throwable,
+    ) : ResourceFileUpdateResult
+
+    data class Cancelled(
+        override val entry: ResourceFileUpdateQueueEntry,
+    ) : ResourceFileUpdateResult
+}
+
+internal class ResourceFileUpdateCoordinator(
+    private val scope: CoroutineScope,
+    private val execute: suspend (ResourceFileUpdateRequest) -> ResourceFilesStatus,
+    private val cancelRunning: () -> Unit,
+) {
+    private val lock = Any()
+    private val pending = ArrayDeque<ResourceFileUpdateQueueEntry>()
+    private var running: ResourceFileUpdateQueueEntry? = null
+    private var completionRevision = 0L
+    private var nextEntryId = 1L
+    private var worker: Job? = null
+    private var runningJob: Job? = null
+
+    private val mutableState = MutableStateFlow(ResourceFileUpdateQueueState())
+    val state: StateFlow<ResourceFileUpdateQueueState> = mutableState.asStateFlow()
+
+    private val mutableResults = MutableSharedFlow<ResourceFileUpdateResult>(extraBufferCapacity = 16)
+    val results: SharedFlow<ResourceFileUpdateResult> = mutableResults.asSharedFlow()
+
+    fun enqueue(request: ResourceFileUpdateRequest): Boolean = synchronized(lock) {
+        if (request.targets.isEmpty()) return false
+        if (request is ResourceFileUpdateRequest.All && mutableState.value.isBusy) return false
+        val busyTargets = buildSet {
+            running?.request?.targets?.let(::addAll)
+            pending.forEach { entry -> addAll(entry.request.targets) }
+        }
+        if (request.targets.any(busyTargets::contains)) return false
+
+        pending.addLast(
+            ResourceFileUpdateQueueEntry(
+                id = nextEntryId++,
+                request = request,
+            ),
+        )
+        publishStateLocked()
+        if (worker?.isActive != true) {
+            worker = scope.launch { drainQueue() }
+        }
+        true
+    }
+
+    // Broadcast updates wait for UI work rather than silently dropping a busy All request.
+    suspend fun enqueueAndAwait(
+        request: ResourceFileUpdateRequest,
+        isStillValid: () -> Boolean = { true },
+    ): ResourceFileUpdateResult? = coroutineScope {
+        if (request.targets.isEmpty()) return@coroutineScope null
+        val completion = async(start = CoroutineStart.UNDISPATCHED) {
+            results.first { it.request === request }
+        }
+        var accepted = false
+        try {
+            while (!accepted) {
+                state.first { !it.isBusy }
+                if (!isStillValid()) return@coroutineScope null
+                accepted = enqueue(request)
+            }
+            completion.await()
+        } catch (error: CancellationException) {
+            if (accepted) cancel(request)
+            throw error
+        } finally {
+            completion.cancel()
+        }
+    }
+
+    fun cancelAll() = cancel(null)
+
+    private fun cancel(request: ResourceFileUpdateRequest?) = synchronized(lock) {
+        val removed = pending.filter { request == null || it.request === request }
+        pending.removeAll(removed.toSet())
+        removed.forEach { mutableResults.tryEmit(ResourceFileUpdateResult.Cancelled(it)) }
+        if (running != null && (request == null || running?.request === request)) {
+            runningJob?.cancel()
+            cancelRunning()
+        }
+        publishStateLocked()
+    }
+
+    private suspend fun drainQueue() = supervisorScope {
+        while (true) {
+            val execution = synchronized(lock) {
+                val entry = pending.removeFirstOrNull()
+                if (entry == null) {
+                    worker = null
+                    publishStateLocked()
+                    null
+                } else {
+                    val job = async(start = CoroutineStart.LAZY) { execute(entry.request) }
+                    running = entry
+                    runningJob = job
+                    publishStateLocked()
+                    entry to job
+                }
+            } ?: return@supervisorScope
+            val (entry, job) = execution
+            val result = try {
+                job.await()
+                ResourceFileUpdateResult.Success(entry)
+            } catch (error: CancellationException) {
+                try {
+                    currentCoroutineContext().ensureActive()
+                } catch (scopeError: CancellationException) {
+                    clearAfterScopeCancellation()
+                    throw scopeError
+                }
+                ResourceFileUpdateResult.Cancelled(entry)
+            } catch (_: AndroidResourceFileDownloadCancelledException) {
+                ResourceFileUpdateResult.Cancelled(entry)
+            } catch (error: Throwable) {
+                ResourceFileUpdateResult.Failure(entry, error)
+            }
+
+            synchronized(lock) {
+                running = null
+                runningJob = null
+                completionRevision += 1
+                publishStateLocked()
+            }
+            mutableResults.emit(result)
+        }
+    }
+
+    private fun clearAfterScopeCancellation() = synchronized(lock) {
+        runningJob = null
+        running = null
+        pending.clear()
+        worker = null
+        publishStateLocked()
+    }
+
+    private fun publishStateLocked() {
+        mutableState.value = ResourceFileUpdateQueueState(
+            running = running,
+            pending = pending.toList(),
+            completionRevision = completionRevision,
+        )
+    }
+}

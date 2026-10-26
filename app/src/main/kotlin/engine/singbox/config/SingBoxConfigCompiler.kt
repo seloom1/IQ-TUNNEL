@@ -1,0 +1,1145 @@
+// Copyright 2026, AsteriskBOX contributors
+// SPDX-License-Identifier: GPL-3.0
+
+package engine.singbox.config
+
+import android.content.Context
+import app.AppState
+import app.DefaultSingBoxUrlTestUrl
+import app.effectiveFakeIpEnabled
+import app.isValidConnectionTestUrl
+import app.ManagedApiServiceTag
+import app.ManagedDirectOutboundTag
+import app.ManagedGlobalSelectorTag
+import app.ManagedLocalInboundTag
+import app.ManagedRootInboundTag
+import app.ManagedTunInboundTag
+import app.OutboundState
+import app.SingBoxRouteNetworkStrategies
+import app.SingBoxRouteNetworkTypes
+import app.SingBoxRouteRuleActionReject
+import app.SingBoxRouteRuleLogicalModeOr
+import app.SingBoxRouteRuleState
+import app.SingBoxRouteRuleTypeLogical
+import app.SingBoxSelectorTypeSelector
+import app.SingBoxSelectorTypeUrlTest
+import app.expandSelectorMemberReferences
+import app.isManagedSingBoxTag
+import app.managedOutboundGroupSelectorTag
+import app.managedRuleSetChoices
+import app.modes.RunModeBpf2Socks
+import app.modes.RunModeEbpf
+import app.modes.RunModeTproxy
+import app.modes.RunModeTun
+import app.modes.RunModeTun2Socks
+import app.modes.RunModeVpnService
+import app.modes.isRootRunMode
+import app.rootIpv6DataPathEnabled
+import app.withCanonicalManagedTagReferences
+import app.withPrunedDnsServerReferences
+import app.withUnavailableManagedRuleSetsDisabled
+import engine.network.toPortOrNull
+import engine.proxy.LocalProxyLoopbackAddress
+import engine.proxy.toLocalProxyOptions
+import engine.root.RootModeEngine
+import engine.singbox.isNonNegativeSingBoxDuration
+import engine.singbox.effectiveEbpfDnsMode
+import engine.singbox.EbpfLocalDataPlanes
+import engine.singbox.EbpfSharedDataPlanes
+import engine.singbox.singBoxControlConfig
+import engine.vpn.toTunOptions
+import features.resources.runtime.singBoxHostsFiles
+import features.resources.SingBoxRuleSetFileFormat
+import features.resources.runtime.singBoxRuleSetFiles
+import features.resources.singBoxRuleSetFormatOrNull
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
+import java.io.File
+
+internal const val APP_GLOBAL_SELECTOR = ManagedGlobalSelectorTag
+internal const val APP_LOCAL_INBOUND = ManagedLocalInboundTag
+internal const val APP_TUN_INBOUND = ManagedTunInboundTag
+internal const val APP_DIRECT_OUTBOUND = ManagedDirectOutboundTag
+internal const val APP_ROOT_INBOUND = ManagedRootInboundTag
+
+internal data class SingBoxLocalRuleSet(
+    val tag: String,
+    val path: String,
+    val format: SingBoxRuleSetFileFormat,
+)
+
+internal object SingBoxConfigCompiler {
+    fun compile(
+        context: Context,
+        appState: AppState,
+        runMode: Int = appState.runMode,
+        exposePorts: Boolean = true,
+        customResourceFileOverrides: Map<Int, File> = emptyMap(),
+    ): String = finalizeConfig(
+        generate(context, appState, runMode, exposePorts, customResourceFileOverrides),
+        appState,
+    )
+
+    internal fun generate(
+        context: Context,
+        appState: AppState,
+        runMode: Int = appState.runMode,
+        exposePorts: Boolean = true,
+        customResourceFileOverrides: Map<Int, File> = emptyMap(),
+    ): JsonObject {
+        val canonicalState = appState.withCanonicalManagedTagReferences()
+        val filesByName = context.singBoxRuleSetFiles(canonicalState.customResourceFiles)
+            .associateByTo(linkedMapOf()) { file -> file.name.lowercase() }
+        canonicalState.customResourceFiles.forEach { customFile ->
+            customResourceFileOverrides[customFile.id]
+                ?.takeIf { file -> file.isFile && file.length() > 0L }
+                ?.let { file -> filesByName[customFile.name.lowercase()] = file }
+        }
+        val hostsResourcePaths = context.singBoxHostsFiles(
+            canonicalState.customResourceFiles,
+            customResourceFileOverrides,
+        ).mapValues { (_, file) -> file.absolutePath }
+        val choicesByFileName = canonicalState
+            .managedRuleSetChoices(filesByName.keys)
+            .associateBy { choice -> choice.fileName }
+        val localRuleSets = choicesByFileName.values.mapNotNull { choice ->
+            val file = filesByName[choice.fileName.lowercase()] ?: return@mapNotNull null
+            val format = choice.fileName.singBoxRuleSetFormatOrNull() ?: return@mapNotNull null
+            SingBoxLocalRuleSet(
+                tag = choice.tag,
+                path = file.absolutePath,
+                format = format,
+            )
+        }.distinctBy(SingBoxLocalRuleSet::tag)
+        val runtimeState = canonicalState
+            .withUnavailableManagedRuleSetsDisabled(
+                localRuleSets.mapTo(mutableSetOf(), SingBoxLocalRuleSet::tag),
+            )
+            .withPrunedDnsServerReferences()
+        return compileGeneratedRoot(
+            appState = runtimeState,
+            runMode = runMode,
+            exposePorts = exposePorts,
+            localRuleSets = localRuleSets,
+            hostsResourcePaths = hostsResourcePaths,
+            rootUidPolicy = if (runMode == RunModeEbpf || runMode == RunModeTun) {
+                context.resolveRootInboundUidPolicy(runtimeState)
+            } else {
+                RootInboundUidPolicy()
+            },
+        )
+    }
+
+    private fun finalizeConfig(root: JsonObject, appState: AppState): String {
+        val overridden = applySingBoxConfigOverride(
+            root, appState.enableConfigOverrideScript, appState.configOverrideScript,
+        )
+        val encoded = encodeSingBoxJson(overridden)
+        SingBoxConfigChecker.check(encoded)
+        return encoded
+    }
+
+    internal fun compileGeneratedRoot(
+        appState: AppState,
+        runMode: Int = appState.runMode,
+        exposePorts: Boolean = true,
+        localRuleSets: List<SingBoxLocalRuleSet> = emptyList(),
+        rootUidPolicy: RootInboundUidPolicy = RootInboundUidPolicy(),
+        hostsResourcePaths: Map<Int, String> = emptyMap(),
+    ): JsonObject = generateRoot(
+        sourceRoot = JsonObject(emptyMap()),
+        appState = appState.withCanonicalManagedTagReferences(),
+        runMode = runMode,
+        exposePorts = exposePorts,
+        localRuleSets = localRuleSets,
+        hostsResourcePaths = hostsResourcePaths,
+        rootUidPolicy = rootUidPolicy,
+    )
+
+    private fun generateRoot(
+        sourceRoot: JsonObject,
+        appState: AppState,
+        runMode: Int = appState.runMode,
+        exposePorts: Boolean = true,
+        localRuleSets: List<SingBoxLocalRuleSet> = emptyList(),
+        rootUidPolicy: RootInboundUidPolicy = RootInboundUidPolicy(),
+        hostsResourcePaths: Map<Int, String> = emptyMap(),
+    ): JsonObject {
+        val managedSourceRoot = sourceRoot.withLocalRuleSets(localRuleSets)
+        val availableRuleSetTags = localRuleSets.mapTo(linkedSetOf(), SingBoxLocalRuleSet::tag)
+        val dnsResult = SingBoxDnsCompiler.compile(appState, hostsResourcePaths)
+        var runtime = managedSourceRoot
+            .updated("log", compileLog(managedSourceRoot["log"] as? JsonObject, appState))
+            .updated(
+                "inbounds",
+                compileInbounds(
+                    root = managedSourceRoot,
+                    appState = appState,
+                    runMode = runMode,
+                    exposePorts = exposePorts,
+                    rootUidPolicy = rootUidPolicy,
+                    availableRuleSetTags = availableRuleSetTags,
+                ),
+            )
+            .updated("endpoints", compileEndpoints(managedSourceRoot, appState))
+            .updated("outbounds", compileOutbounds(managedSourceRoot, appState))
+            .updated("services", compileServices(managedSourceRoot, appState, runMode, exposePorts))
+
+        runtime = runtime.updated("dns", dnsResult?.dns)
+        val availableOutboundTags = sequenceOf(
+            runtime["endpoints"] as? JsonArray,
+            runtime["outbounds"] as? JsonArray,
+        )
+            .filterNotNull()
+            .flatMap(JsonArray::asSequence)
+            .mapNotNull { target ->
+                ((target as? JsonObject)?.get("tag") as? JsonPrimitive)
+                    ?.contentOrNull
+                    ?.takeIf(String::isNotBlank)
+            }
+            .toSet()
+        runtime = runtime.updated(
+            "route",
+            compileRoute(
+                sourceRoute = managedSourceRoot["route"] as? JsonObject,
+                appState = appState,
+                availableOutboundTags = availableOutboundTags,
+                dnsEnabled = runtime["dns"] is JsonObject,
+                defaultDomainResolver = dnsResult?.defaultDomainResolver,
+            ),
+        )
+
+        SingBoxDeprecatedConfigValidator.validate(runtime)
+        runtime = runtime.updated(
+            "experimental",
+            compileExperimental(appState),
+        )
+        return runtime
+    }
+}
+
+internal fun JsonObject.withLocalRuleSets(localRuleSets: List<SingBoxLocalRuleSet>): JsonObject {
+    val sourceRoute = this["route"] as? JsonObject
+    val sourceRuleSets = sourceRoute?.get("rule_set") as? JsonArray
+    if (sourceRuleSets == null && localRuleSets.isEmpty()) return this
+    val retainedRuleSets = sourceRuleSets
+        ?.filterNot { element ->
+            val tag = ((element as? JsonObject)?.get("tag") as? JsonPrimitive)?.contentOrNull
+            tag?.let(::isManagedSingBoxTag) == true
+        }
+        .orEmpty()
+    val compiledRuleSets: List<JsonElement> = retainedRuleSets + localRuleSets.map { ruleSet ->
+        buildJsonObject {
+            put("type", "local")
+            put("tag", ruleSet.tag)
+            put("format", ruleSet.format.configValue)
+            put("path", ruleSet.path)
+        }
+    }
+    val managedRoute = JsonObject(
+        buildMap {
+            sourceRoute?.let(::putAll)
+            put("rule_set", JsonArray(compiledRuleSets))
+        },
+    )
+    return updated("route", managedRoute)
+}
+
+private fun compileLog(source: JsonObject?, appState: AppState): JsonObject =
+    JsonObject(
+        buildMap {
+            source?.let(::putAll)
+            remove("disabled")
+            put(
+                "level",
+                JsonPrimitive(appState.coreLogLevel),
+            )
+        },
+    )
+
+private fun compileInbounds(
+    root: JsonObject,
+    appState: AppState,
+    runMode: Int,
+    exposePorts: Boolean,
+    rootUidPolicy: RootInboundUidPolicy,
+    availableRuleSetTags: Set<String>,
+): JsonArray {
+    val retained = (root["inbounds"] as? JsonArray)
+        .orEmptyObjects()
+        .filterNot(JsonObject::hasAppTag)
+        .toMutableList()
+    if (!exposePorts) return JsonArray(retained)
+
+    retained += compileLocalInbound(appState)
+    when (runMode) {
+        RunModeVpnService -> if (!appState.enableVpnHevTun) {
+            retained += compileTunInbound(appState, rootMode = false)
+        }
+        RunModeTproxy -> retained += buildJsonObject {
+            put("type", "tproxy")
+            put("tag", APP_ROOT_INBOUND)
+            put("listen", if (appState.rootIpv6DataPathEnabled) "::" else "0.0.0.0")
+            put("listen_port", appState.transparentProxyPort.toPortOrNull() ?: RootModeEngine.DefaultTproxyPort)
+        }
+        RunModeTun2Socks, RunModeBpf2Socks -> retained += buildJsonObject {
+            put("type", "socks")
+            put("tag", APP_ROOT_INBOUND)
+            put("listen", LocalProxyLoopbackAddress)
+            put("listen_port", appState.socks5ProxyPort.toPortOrNull() ?: RootModeEngine.DefaultTun2SocksProxyPort)
+        }
+        RunModeTun -> retained += compileTunInbound(
+            appState,
+            rootMode = true,
+            uidPolicy = rootUidPolicy,
+            availableRuleSetTags = availableRuleSetTags,
+        )
+        RunModeEbpf -> retained += compileEbpfInbound(
+            appState = appState,
+            uidPolicy = rootUidPolicy,
+            availableRuleSetTags = availableRuleSetTags,
+        )
+    }
+    return JsonArray(retained)
+}
+
+internal fun compileEbpfInbound(
+    appState: AppState,
+    uidPolicy: RootInboundUidPolicy,
+    availableRuleSetTags: Set<String>,
+): JsonObject {
+    val sharedInterfaces = normalizeTunSharedNetworkInterfaces(appState.tunSharedNetworkInterfaces)
+    require(sharedInterfaces.all(::isSingBoxSharedNetworkInterface)) {
+        "eBPF shared interfaces must be exact, non-loopback interface names"
+    }
+    require(appState.ebpfLocalDataPlane in EbpfLocalDataPlanes) {
+        "eBPF local data_plane must be tc or cgroup"
+    }
+    require(sharedInterfaces.isEmpty() || appState.ebpfSharedDataPlane in EbpfSharedDataPlanes) {
+        "eBPF shared data_plane must be socket_assign or packet_rewrite"
+    }
+    val bypassRuleSets = appState.availableTunBypassRuleSetTags(availableRuleSetTags)
+    return buildJsonObject {
+        put("type", "ebpf")
+        put("tag", APP_ROOT_INBOUND)
+        putJsonObject("local") {
+            put("enabled", true)
+            put("data_plane", appState.ebpfLocalDataPlane)
+            put("dns_mode", appState.ebpfLocalDnsMode.effectiveEbpfDnsMode(appState.enableLocalDns))
+            put("ipv6", appState.enableIpv6)
+            put("bypass_private_address", appState.enableRootEbpfPrivateAddressBypass)
+            if (bypassRuleSets.isNotEmpty()) {
+                putJsonArray("bypass_rule_set") {
+                    bypassRuleSets.forEach(::add)
+                }
+            }
+            if (uidPolicy.includeUids.isNotEmpty()) {
+                putJsonArray("include_uid") {
+                    uidPolicy.includeUids.distinct().sorted().forEach(::add)
+                }
+            }
+            if (uidPolicy.excludeUids.isNotEmpty()) {
+                putJsonArray("exclude_uid") {
+                    uidPolicy.excludeUids.distinct().sorted().forEach(::add)
+                }
+            }
+        }
+        if (sharedInterfaces.isNotEmpty()) {
+            putJsonObject("shared") {
+                put("enabled", true)
+                put("data_plane", appState.ebpfSharedDataPlane)
+                put("dns_mode", appState.ebpfSharedDnsMode.effectiveEbpfDnsMode(appState.enableLocalDns))
+                putJsonArray("interface") {
+                    sharedInterfaces.forEach(::add)
+                }
+                put("bypass_private_address", appState.enableRootEbpfPrivateAddressBypass)
+                put("ipv6", appState.enableIpv6)
+                if (bypassRuleSets.isNotEmpty()) {
+                    putJsonArray("bypass_rule_set") {
+                        bypassRuleSets.forEach(::add)
+                    }
+                }
+            }
+        }
+    }
+}
+
+private fun AppState.availableTunBypassRuleSetTags(
+    availableTags: Set<String>,
+): List<String> =
+    tunBypassRuleSetTags
+        .map(String::trim)
+        .filter(String::isNotEmpty)
+        .distinct()
+        .filter(availableTags::contains)
+
+private fun compileLocalInbound(appState: AppState): JsonObject {
+    val options = appState.toLocalProxyOptions()
+    return buildJsonObject {
+        put("type", "mixed")
+        put("tag", APP_LOCAL_INBOUND)
+        put("listen", options.listenAddress)
+        put("listen_port", options.port)
+        if (options.username.isNotBlank()) {
+            putJsonArray("users") {
+                add(
+                    buildJsonObject {
+                        put("username", options.username)
+                        put("password", options.password)
+                    },
+                )
+            }
+        }
+    }
+}
+
+internal fun compileTunInbound(
+    appState: AppState,
+    rootMode: Boolean,
+    uidPolicy: RootInboundUidPolicy = RootInboundUidPolicy(),
+    availableRuleSetTags: Set<String> = emptySet(),
+): JsonObject {
+    val options = appState.toTunOptions()
+    return buildJsonObject {
+        put("type", "tun")
+        put("tag", APP_TUN_INBOUND)
+        if (rootMode) {
+            put("interface_name", SingBoxTunDevice)
+            put("auto_redirect", true)
+            val sharedInterfaces = normalizeTunSharedNetworkInterfaces(appState.tunSharedNetworkInterfaces)
+                .filterNot { it == "lo" }
+            require(sharedInterfaces.all(::isSingBoxSharedNetworkInterface)) {
+                "TUN shared interfaces must be exact interface names"
+            }
+            // lo keeps local OUTPUT enabled; an empty shared list must not capture other ingress.
+            putJsonArray("include_interface") {
+                (listOf("lo") + sharedInterfaces).forEach(::add)
+            }
+            if (uidPolicy.includeUids.isNotEmpty()) {
+                putJsonArray("include_uid") { uidPolicy.includeUids.forEach(::add) }
+            }
+            if (uidPolicy.excludeUids.isNotEmpty()) {
+                putJsonArray("exclude_uid") { uidPolicy.excludeUids.forEach(::add) }
+            }
+            val bypassTags = appState.availableTunBypassRuleSetTags(availableRuleSetTags)
+            if (bypassTags.isNotEmpty()) {
+                putJsonArray("route_exclude_address_set") { bypassTags.forEach(::add) }
+            }
+        }
+        put("auto_route", true)
+        put("mtu", options.mtu)
+        putJsonArray("address") {
+            add("${options.ipv4Address.address}/${options.ipv4Address.prefixLength}")
+            if (appState.enableIpv6) {
+                add("${options.ipv6Address.address}/${options.ipv6Address.prefixLength}")
+            }
+        }
+        put("dns_mode", if (appState.enableLocalDns) "hijack" else "disabled")
+        if (appState.enableLocalDns && !rootMode) {
+            putJsonArray("dns_address") {
+                options.dnsServers.forEach(::add)
+            }
+        }
+    }
+}
+
+internal fun compileOutbounds(root: JsonObject, appState: AppState): JsonArray {
+    val enabledGroups = appState.outboundGroups
+        .filter { group -> group.enabled }
+    val enabledGroupIds = enabledGroups.mapTo(mutableSetOf()) { group -> group.id }
+    val groupDetours = enabledGroups.associate { group -> group.id to group.detour }
+    val managedOutbounds = appState.outbounds
+        .asSequence()
+        .filter { outbound -> outbound.groupId in enabledGroupIds }
+        .mapNotNull { outbound ->
+            runCatching { parseSingBoxJson(outbound.json) }
+                .getOrNull()
+                ?.takeIf { parsed -> outbound.shouldRetainRawGroupedOutbound(parsed) }
+                ?.let { parsed ->
+                    outbound.groupId to JsonObject(
+                        buildMap {
+                            putAll(parsed)
+                            put("type", JsonPrimitive(outbound.type))
+                            put("tag", JsonPrimitive(outbound.tag))
+                            outbound.inheritedGroupDetour(groupDetours[outbound.groupId].orEmpty(), parsed)
+                                ?.let { detour -> put("detour", JsonPrimitive(detour)) }
+                        },
+                    )
+                }
+        }
+        .distinctBy { (_, outbound) ->
+            (outbound["tag"] as? JsonPrimitive)?.contentOrNull
+        }
+        .toList()
+    val managedTags = managedOutbounds.mapNotNullTo(mutableSetOf()) { (_, outbound) ->
+        (outbound["tag"] as? JsonPrimitive)?.contentOrNull
+    }
+    val claimedCustomSelectorTags = appState.selectors
+        .mapTo(mutableSetOf()) { selector -> selector.tag }
+    val retained = (root["outbounds"] as? JsonArray)
+        .orEmptyObjects()
+        .filterNot { outbound ->
+            outbound.hasAppTag() ||
+                (outbound["tag"] as? JsonPrimitive)?.contentOrNull in managedTags ||
+                (outbound["tag"] as? JsonPrimitive)?.contentOrNull in claimedCustomSelectorTags
+        }
+        .toMutableList()
+    retained += managedOutbounds
+        .filterNot { (_, outbound) ->
+            (outbound["type"] as? JsonPrimitive)?.contentOrNull == "wireguard"
+        }
+        .map { (_, outbound) -> outbound }
+    val outboundCandidates = retained.mapNotNull { outbound ->
+        val tag = (outbound["tag"] as? JsonPrimitive)
+            ?.contentOrNull
+            ?.takeIf(String::isNotBlank)
+            ?: return@mapNotNull null
+        val type = (outbound["type"] as? JsonPrimitive)?.contentOrNull.orEmpty()
+        tag to type
+    }
+    val outboundCandidateTags = outboundCandidates.map { (tag, _) -> tag }
+    val endpointCandidateTags = compileEndpoints(root, appState).mapNotNull { endpoint ->
+        (endpoint as? JsonObject)
+            ?.get("tag")
+            ?.let { tag -> (tag as? JsonPrimitive)?.contentOrNull }
+            ?.takeIf(String::isNotBlank)
+    }
+    val candidateTags = (outboundCandidateTags + endpointCandidateTags).distinct()
+    val candidateSelectorTags = outboundCandidates
+        .filter { (_, type) -> type == SingBoxSelectorTypeSelector }
+        .map { (tag, _) -> tag }
+    val candidateUrlTestTags = outboundCandidates
+        .filter { (_, type) -> type == SingBoxSelectorTypeUrlTest }
+        .map { (tag, _) -> tag }
+    val groupedCandidateTags = (candidateSelectorTags + candidateUrlTestTags).toSet()
+    val ordinaryCandidateTags = candidateTags.filterNot(groupedCandidateTags::contains)
+    retained += buildJsonObject {
+        put("type", "direct")
+        put("tag", APP_DIRECT_OUTBOUND)
+    }
+    val managedGroupTags = mutableListOf<String>()
+    enabledGroups.forEach { group ->
+        val members = managedOutbounds
+            .filter { (groupId, _) -> groupId == group.id }
+            .mapNotNull { (_, outbound) ->
+                (outbound["tag"] as? JsonPrimitive)?.contentOrNull
+                    ?.takeIf(String::isNotBlank)
+            }
+        if (members.isNotEmpty()) {
+            val groupTag = managedOutboundGroupSelectorTag(group.id, group.name)
+            retained += buildSelectorOutbound(
+                tag = groupTag,
+                members = members,
+                default = appState.selectorDefault(
+                    selectorTag = groupTag,
+                    members = members,
+                    fallback = members.first(),
+                ),
+                interruptExistConnections = true,
+            )
+            managedGroupTags += groupTag
+        }
+    }
+    val managedSelectors = appState.selectors
+        .distinctBy { selector -> selector.id }
+        .filter { selector ->
+            selector.type == SingBoxSelectorTypeSelector ||
+                selector.type == SingBoxSelectorTypeUrlTest
+        }
+    val baseAvailableCustomMembers = (
+        managedGroupTags +
+            candidateSelectorTags +
+            candidateUrlTestTags +
+            APP_DIRECT_OUTBOUND +
+            APP_GLOBAL_SELECTOR +
+            ordinaryCandidateTags
+        ).distinct()
+    val emittableManagedSelectorTags = mutableSetOf<String>()
+    while (
+        managedSelectors
+            .filterNot { selector -> selector.tag in emittableManagedSelectorTags }
+            .any { selector ->
+                val availableMembers = baseAvailableCustomMembers +
+                    emittableManagedSelectorTags
+                val canEmit = appState.expandSelectorMemberReferences(
+                    references = selector.outbounds,
+                    availableMemberTags = availableMembers,
+                ).any { member -> member != selector.tag }
+                if (canEmit) emittableManagedSelectorTags += selector.tag
+                canEmit
+            }
+    ) {
+        // Resolve selectors from concrete members outward until no more are emit-able.
+    }
+    val customSelectorTags = managedSelectors
+        .filter { selector -> selector.type == SingBoxSelectorTypeSelector }
+        .map { selector -> selector.tag }
+        .filter(emittableManagedSelectorTags::contains)
+        .distinct()
+    val customUrlTestTags = managedSelectors
+        .filter { selector -> selector.type == SingBoxSelectorTypeUrlTest }
+        .map { selector -> selector.tag }
+        .filter(emittableManagedSelectorTags::contains)
+        .distinct()
+    val globalSelectorMembers = (
+        listOf(APP_DIRECT_OUTBOUND) +
+            managedGroupTags +
+            customSelectorTags +
+            customUrlTestTags +
+            endpointCandidateTags +
+            ordinaryCandidateTags
+        ).distinct()
+    val availableCustomMembers = (
+        managedGroupTags +
+            customSelectorTags +
+            candidateSelectorTags +
+            customUrlTestTags +
+            candidateUrlTestTags +
+            APP_DIRECT_OUTBOUND +
+            APP_GLOBAL_SELECTOR +
+            ordinaryCandidateTags
+        ).distinct()
+    managedSelectors
+        .asSequence()
+        .filter { selector -> selector.tag in emittableManagedSelectorTags }
+        .forEach { selector ->
+            val members = appState.expandSelectorMemberReferences(
+                references = selector.outbounds,
+                availableMemberTags = availableCustomMembers,
+            ).filter { member -> member != selector.tag }
+            if (members.isNotEmpty()) {
+                when (selector.type) {
+                    SingBoxSelectorTypeSelector -> {
+                        retained += buildSelectorOutbound(
+                            tag = selector.tag,
+                            members = members,
+                            default = appState.selectorDefault(
+                                selectorTag = selector.tag,
+                                members = members,
+                                fallback = selector.default.trim().takeIf(members::contains)
+                                    ?: members.first(),
+                            ),
+                            interruptExistConnections = selector.interruptExistConnections,
+                        )
+                    }
+                    SingBoxSelectorTypeUrlTest -> {
+                        retained += buildUrlTestOutbound(
+                            selector = selector,
+                            members = members,
+                            appState = appState,
+                        )
+                    }
+                }
+            }
+        }
+    retained += buildJsonObject {
+        put("type", "selector")
+        put("tag", APP_GLOBAL_SELECTOR)
+        putJsonArray("outbounds") {
+            globalSelectorMembers.forEach(::add)
+        }
+        put(
+            "default",
+            appState.selectorDefault(
+                selectorTag = APP_GLOBAL_SELECTOR,
+                members = globalSelectorMembers,
+                fallback = globalSelectorMembers.first(),
+            ),
+        )
+        put("interrupt_exist_connections", true)
+    }
+    return JsonArray(retained)
+}
+
+private fun OutboundState.shouldRetainRawGroupedOutbound(parsed: JsonObject): Boolean {
+    if (
+        type != SingBoxSelectorTypeSelector &&
+        type != SingBoxSelectorTypeUrlTest
+    ) {
+        return true
+    }
+    // Malformed shapes stay on the existing compiler/validation path. Only cleanup's [] is silent.
+    val members = parsed["outbounds"] as? JsonArray ?: return true
+    return members.isNotEmpty()
+}
+
+private fun AppState.selectorDefault(
+    selectorTag: String,
+    members: List<String>,
+    fallback: String,
+): String = selectorSelections[selectorTag]
+    ?.takeIf(members::contains)
+    ?: fallback
+
+private fun buildSelectorOutbound(
+    tag: String,
+    members: List<String>,
+    default: String,
+    interruptExistConnections: Boolean,
+): JsonObject = buildJsonObject {
+    put("type", "selector")
+    put("tag", tag)
+    putJsonArray("outbounds") {
+        members.forEach(::add)
+    }
+    put("default", default)
+    put("interrupt_exist_connections", interruptExistConnections)
+}
+
+private fun buildUrlTestOutbound(
+    selector: app.SingBoxSelectorState,
+    members: List<String>,
+    appState: AppState,
+): JsonObject = buildJsonObject {
+    put("type", SingBoxSelectorTypeUrlTest)
+    put("tag", selector.tag)
+    putJsonArray("outbounds") {
+        members.forEach(::add)
+    }
+    // A blank per-group URL falls back to the global connection-test URL
+    // when that one is a valid HTTP(S) URL, else to the built-in default.
+    val effectiveUrl = selector.url.trim()
+        .takeIf(String::isNotEmpty)
+        ?: appState.connectionTestUrl.trim().takeIf(::isValidConnectionTestUrl)
+        ?: DefaultSingBoxUrlTestUrl
+    put("url", effectiveUrl)
+    put("interval", selector.interval.trim())
+    put("tolerance", selector.tolerance)
+    put("idle_timeout", selector.idleTimeout.trim())
+    put("interrupt_exist_connections", selector.interruptExistConnections)
+}
+
+internal fun compileEndpoints(root: JsonObject, appState: AppState): JsonArray {
+    val enabledGroupIds = appState.outboundGroups
+        .filter { group -> group.enabled }
+        .mapTo(mutableSetOf()) { group -> group.id }
+    val groupDetours = appState.outboundGroups
+        .filter { group -> group.enabled }
+        .associate { group -> group.id to group.detour }
+    val managedOutboundEndpoints = appState.outbounds
+        .asSequence()
+        .filter { outbound -> outbound.groupId in enabledGroupIds && outbound.type == "wireguard" }
+        .mapNotNull { outbound ->
+            runCatching { parseSingBoxJson(outbound.json) }
+                .getOrNull()
+                ?.let { parsed ->
+                    val server = (parsed["server"] as? JsonPrimitive)?.contentOrNull
+                    val port = (parsed["server_port"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
+                        ?: (parsed["port"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
+                    val peerPubKey = (parsed["peer_public_key"] as? JsonPrimitive)?.contentOrNull
+                    val psk = (parsed["pre_shared_key"] as? JsonPrimitive)?.contentOrNull
+                    val addresses = (parsed["address"] as? JsonArray)
+                        ?: (parsed["local_address"] as? JsonArray)
+                        ?: JsonArray(emptyList())
+
+                    val existingPeers = parsed["peers"] as? JsonArray
+                    val peers = if (existingPeers != null && existingPeers.isNotEmpty()) {
+                        existingPeers
+                    } else if (!server.isNullOrBlank() && port != null && !peerPubKey.isNullOrBlank()) {
+                        buildJsonArray {
+                            add(
+                                buildJsonObject {
+                                    put("address", server)
+                                    put("port", port)
+                                    put("public_key", peerPubKey)
+                                    psk?.let { put("pre_shared_key", it) }
+                                    put("allowed_ips", buildJsonArray { add(JsonPrimitive("0.0.0.0/0")); add(JsonPrimitive("::/0")) })
+                                },
+                            )
+                        }
+                    } else {
+                        null
+                    }
+
+                    buildJsonObject {
+                        put("type", "wireguard")
+                        put("tag", outbound.tag)
+                        put("system", (parsed["system"] as? JsonPrimitive)?.booleanOrNull ?: false)
+                        put("address", addresses)
+                        parsed["private_key"]?.let { put("private_key", it) }
+                        parsed["listen_port"]?.let { put("listen_port", it) }
+                        parsed["mtu"]?.let { put("mtu", it) }
+                        parsed["workers"]?.let { put("workers", it) }
+                        peers?.let { put("peers", it) }
+                        outbound.inheritedGroupDetour(groupDetours[outbound.groupId].orEmpty(), parsed)
+                            ?.let { detour -> put("detour", detour) }
+                    }
+                }
+        }
+        .toList()
+    val managed = (
+        appState.endpoints
+            .asSequence()
+            .filter { endpoint -> endpoint.type in app.SupportedSingBoxEndpointTypes }
+            .mapNotNull { endpoint ->
+                runCatching { parseSingBoxJson(endpoint.json) }
+                    .getOrNull()
+                    ?.let { parsed ->
+                        val server = (parsed["server"] as? JsonPrimitive)?.contentOrNull
+                        val port = (parsed["server_port"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
+                            ?: (parsed["port"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
+                        val peerPubKey = (parsed["peer_public_key"] as? JsonPrimitive)?.contentOrNull
+                        val psk = (parsed["pre_shared_key"] as? JsonPrimitive)?.contentOrNull
+                        val addresses = (parsed["address"] as? JsonArray)
+                            ?: (parsed["local_address"] as? JsonArray)
+
+                        val existingPeers = parsed["peers"] as? JsonArray
+                        val peers = if (existingPeers != null && existingPeers.isNotEmpty()) {
+                            existingPeers
+                        } else if (!server.isNullOrBlank() && port != null && !peerPubKey.isNullOrBlank()) {
+                            buildJsonArray {
+                                add(
+                                    buildJsonObject {
+                                        put("address", server)
+                                        put("port", port)
+                                        put("public_key", peerPubKey)
+                                        psk?.let { put("pre_shared_key", it) }
+                                        put("allowed_ips", buildJsonArray { add(JsonPrimitive("0.0.0.0/0")); add(JsonPrimitive("::/0")) })
+                                    },
+                                )
+                            }
+                        } else {
+                            null
+                        }
+
+                        if (endpoint.type == "wireguard") {
+                            buildJsonObject {
+                                put("type", "wireguard")
+                                put("tag", endpoint.tag)
+                                put("system", (parsed["system"] as? JsonPrimitive)?.booleanOrNull ?: false)
+                                addresses?.let { put("address", it) }
+                                parsed["private_key"]?.let { put("private_key", it) }
+                                parsed["listen_port"]?.let { put("listen_port", it) }
+                                parsed["mtu"]?.let { put("mtu", it) }
+                                parsed["workers"]?.let { put("workers", it) }
+                                peers?.let { put("peers", it) }
+                                parsed["detour"]?.let { put("detour", it) }
+                            }
+                        } else {
+                            JsonObject(
+                                buildMap {
+                                    putAll(parsed)
+                                    put("type", JsonPrimitive(endpoint.type))
+                                    put("tag", JsonPrimitive(endpoint.tag))
+                                },
+                            )
+                        }
+                    }
+            }
+            .toList() + managedOutboundEndpoints
+    )
+        .distinctBy { endpoint ->
+            (endpoint["tag"] as? JsonPrimitive)?.contentOrNull
+        }
+    val managedTags = managed.mapNotNullTo(mutableSetOf()) { endpoint ->
+        (endpoint["tag"] as? JsonPrimitive)?.contentOrNull
+    }
+    val retained = (root["endpoints"] as? JsonArray)
+        .orEmptyObjects()
+        .filterNot { endpoint ->
+            endpoint.hasAppTag() ||
+                (endpoint["tag"] as? JsonPrimitive)?.contentOrNull in managedTags
+        }
+        .toMutableList()
+    retained += managed
+    return JsonArray(retained)
+}
+
+private fun compileServices(
+    root: JsonObject,
+    appState: AppState,
+    runMode: Int,
+    exposePorts: Boolean,
+): JsonArray? {
+    val retained = (root["services"] as? JsonArray)
+        .orEmptyObjects()
+        .filterNot { service ->
+            (service["type"] as? JsonPrimitive)?.contentOrNull == "api" || service.hasAppTag()
+        }
+        .toMutableList()
+    if (exposePorts && runMode.isRootRunMode()) {
+        val control = appState.singBoxControlConfig()
+        retained += buildJsonObject {
+            put("type", "api")
+            put("tag", ManagedApiServiceTag)
+            put("listen", control.host)
+            put("listen_port", control.port)
+            if (control.secret.isNotEmpty()) {
+                put("secret", control.secret)
+            }
+        }
+    }
+    return retained.takeIf(List<JsonObject>::isNotEmpty)?.let(::JsonArray)
+}
+
+internal fun compileRoute(
+    sourceRoute: JsonObject?,
+    appState: AppState,
+    availableOutboundTags: Set<String>,
+    dnsEnabled: Boolean,
+    defaultDomainResolver: String?,
+): JsonObject {
+    val finalOutbound = resolveRouteFinal(appState, availableOutboundTags)
+    val networkStrategy = appState.routeDefaultNetworkStrategy
+        .trim()
+        .lowercase()
+        .takeIf(SingBoxRouteNetworkStrategies::contains)
+        .orEmpty()
+    val networkTypes = appState.routeDefaultNetworkTypes.sanitizedRouteNetworkTypes()
+    val fallbackNetworkTypes =
+        appState.routeDefaultFallbackNetworkTypes.sanitizedRouteNetworkTypes()
+    val fallbackDelay = appState.routeDefaultFallbackDelay.trim()
+    val existingRules = (sourceRoute?.get("rules") as? JsonArray)
+        .orEmptyObjects()
+    val managedRules = appState.routeRules
+        .filter { it.enabled && !it.hasLegacyRouteModeMatcher() }
+        .map(::compileManagedRouteRule)
+    val injectedRules = buildList {
+        addAll(SingBoxSniffCompiler.compile(appState))
+        if (dnsEnabled) {
+            add(
+                buildJsonObject {
+                    put("port", 53)
+                    put("action", "hijack-dns")
+                },
+            )
+        }
+        add(
+            buildJsonObject {
+                put("clash_mode", "Global")
+                put("action", "route")
+                put("outbound", APP_GLOBAL_SELECTOR)
+            },
+        )
+        add(
+            buildJsonObject {
+                put("clash_mode", "Direct")
+                put("action", "route")
+                put("outbound", APP_DIRECT_OUTBOUND)
+            },
+        )
+    }
+    return JsonObject(
+        buildMap {
+            sourceRoute
+                ?.filterKeys { key -> key !in ManagedRouteSettingKeys }
+                ?.let(::putAll)
+            put("rules", JsonArray(injectedRules + managedRules + existingRules))
+            put("final", JsonPrimitive(finalOutbound))
+            if (defaultDomainResolver != null) {
+                put("default_domain_resolver", JsonPrimitive(defaultDomainResolver))
+            }
+            if (appState.routeAutoDetectInterface) {
+                put("auto_detect_interface", JsonPrimitive(true))
+                if (appState.routeOverrideAndroidVpn) {
+                    put("override_android_vpn", JsonPrimitive(true))
+                }
+                if (networkStrategy.isNotEmpty()) {
+                    put("default_network_strategy", JsonPrimitive(networkStrategy))
+                }
+                if (networkTypes.isNotEmpty()) {
+                    put("default_network_type", JsonArray(networkTypes.map(::JsonPrimitive)))
+                }
+                if (networkStrategy == "fallback") {
+                    if (fallbackNetworkTypes.isNotEmpty()) {
+                        put(
+                            "default_fallback_network_type",
+                            JsonArray(fallbackNetworkTypes.map(::JsonPrimitive)),
+                        )
+                    }
+                    if (
+                        fallbackDelay.isNotEmpty() &&
+                        isNonNegativeSingBoxDuration(fallbackDelay)
+                    ) {
+                        put("default_fallback_delay", JsonPrimitive(fallbackDelay))
+                    }
+                }
+            }
+            if (appState.routeFindProcess) {
+                put("find_process", JsonPrimitive(true))
+            }
+        },
+    )
+}
+
+internal fun resolveRouteFinal(
+    appState: AppState,
+    availableOutboundTags: Set<String>,
+): String = appState.routeFinal
+    .trim()
+    .takeIf(availableOutboundTags::contains)
+    ?: APP_GLOBAL_SELECTOR
+
+private val ManagedRouteSettingKeys = setOf(
+    "auto_detect_interface",
+    "override_android_vpn",
+    "default_network_strategy",
+    "default_network_type",
+    "default_fallback_network_type",
+    "default_fallback_delay",
+    "find_process",
+)
+
+private fun List<String>.sanitizedRouteNetworkTypes(): List<String> {
+    val selected = map { value -> value.trim().lowercase() }.toSet()
+    return SingBoxRouteNetworkTypes.filter(selected::contains)
+}
+
+internal fun SingBoxRouteRuleState.hasLegacyRouteModeMatcher(): Boolean =
+    if (type == SingBoxRouteRuleTypeLogical) {
+        logicalRules.any { it.enabled && it.hasLegacyRouteModeMatcher() }
+    } else {
+        clashMode.isNotBlank()
+    }
+
+internal fun compileManagedRouteRule(rule: SingBoxRouteRuleState): JsonObject {
+    require(!rule.hasLegacyRouteModeMatcher()) { "Rule mode is managed by the application" }
+    return JsonObject(
+        compileManagedRouteMatch(rule) + compileManagedRouteAction(rule),
+    )
+}
+
+private fun compileManagedRouteAction(rule: SingBoxRouteRuleState): JsonObject =
+    buildJsonObject {
+        if (rule.action == SingBoxRouteRuleActionReject) {
+            val method = rule.rejectMethod.takeIf { it in RouteRejectMethods } ?: "default"
+            put("action", SingBoxRouteRuleActionReject)
+            put("method", method)
+            if (rule.rejectNoDrop && method != "drop") put("no_drop", true)
+        } else {
+            put("action", "route")
+            put("outbound", rule.outbound.trim().ifBlank { APP_GLOBAL_SELECTOR })
+        }
+    }
+
+private fun compileManagedRouteMatch(rule: SingBoxRouteRuleState): JsonObject =
+    buildJsonObject {
+        if (rule.type == SingBoxRouteRuleTypeLogical) {
+            put("type", SingBoxRouteRuleTypeLogical)
+            put(
+                "mode",
+                if (rule.logicalMode == SingBoxRouteRuleLogicalModeOr) {
+                    SingBoxRouteRuleLogicalModeOr
+                } else {
+                    "and"
+                },
+            )
+            putJsonArray("rules") {
+                rule.logicalRules
+                    .filter(SingBoxRouteRuleState::enabled)
+                    .forEach { child -> add(compileManagedRouteMatch(child)) }
+            }
+            if (rule.invert) put("invert", true)
+            return@buildJsonObject
+        }
+        putStringArray("inbound", rule.inbound)
+        putStringArray("process_name", rule.processName)
+        putStringArray("process_path", rule.processPath)
+        putStringArray("process_path_regex", rule.processPathRegex)
+        putStringArray("user", rule.user)
+        if (rule.userId.isNotEmpty()) {
+            putJsonArray("user_id") {
+                rule.userId.map { requireNotNull(it.trim().toIntOrNull()) { "Invalid user_id" } }.distinct().forEach(::add)
+            }
+        }
+
+        putStringArray("auth_user", rule.authUser)
+        putStringArray("client", rule.client)
+        putStringArray("package_name_regex", rule.packageNameRegex)
+        if (rule.networkInterfaceAddress.isNotEmpty()) {
+            require(rule.networkInterfaceAddress.all {
+                engine.singbox.singBoxRuleMatcherValueError("network_interface_address", it, "invalid") == null
+            }) { "Invalid network_interface_address" }
+            putJsonObject("network_interface_address") {
+                parseRuleAddressMap(rule.networkInterfaceAddress).forEach { (name, addresses) ->
+                    putJsonArray(name) { addresses.forEach(::add) }
+                }
+            }
+        }
+        putStringArray("source_mac_address", rule.sourceMacAddress)
+        putStringArray("source_hostname", rule.sourceHostname)
+        putStringArray("preferred_by", rule.preferredBy)
+        if (rule.networkIsExpensive) put("network_is_expensive", true)
+
+        if (rule.ipVersion == 4 || rule.ipVersion == 6) {
+            put("ip_version", rule.ipVersion)
+        }
+        putStringArray("network", rule.network)
+        putStringArray("protocol", rule.protocol)
+        putStringArray("domain", rule.domain)
+        putStringArray("domain_suffix", rule.domainSuffix)
+        putStringArray("domain_keyword", rule.domainKeyword)
+        putStringArray("domain_regex", rule.domainRegex)
+        putStringArray("source_ip_cidr", rule.sourceIpCidr)
+        putStringArray("ip_cidr", rule.ipCidr)
+        putPortArray("source_port", rule.sourcePort)
+        putStringArray("source_port_range", rule.sourcePortRange)
+        putPortArray("port", rule.port)
+        putStringArray("port_range", rule.portRange)
+        putStringArray("package_name", rule.packageName)
+        putStringArray("network_type", rule.networkType)
+        putStringArray("wifi_ssid", rule.wifiSsid)
+        putStringArray("wifi_bssid", rule.wifiBssid)
+        putDnsConfigurationMatch("dns_server_address", rule.dnsServerAddress)
+        putDnsConfigurationMatch("dns_search_domain", rule.dnsSearchDomain)
+        putStringArray("rule_set", rule.ruleSet)
+        if (rule.sourceIpIsPrivate) put("source_ip_is_private", true)
+        if (rule.ipIsPrivate) put("ip_is_private", true)
+        if (rule.invert) put("invert", true)
+    }
+
+private fun kotlinx.serialization.json.JsonObjectBuilder.putStringArray(
+    name: String,
+    values: List<String>,
+) {
+    val normalized = values.map(String::trim).filter(String::isNotEmpty).distinct()
+    if (normalized.isEmpty()) return
+    putJsonArray(name) {
+        normalized.forEach(::add)
+    }
+}
+
+private fun kotlinx.serialization.json.JsonObjectBuilder.putPortArray(
+    name: String,
+    values: List<String>,
+) {
+    val ports = values
+        .mapNotNull { value -> value.trim().toIntOrNull()?.takeIf { it in 0..65_535 } }
+        .distinct()
+    if (ports.isEmpty()) return
+    putJsonArray(name) {
+        ports.forEach(::add)
+    }
+}
+
+private fun JsonArray?.orEmptyObjects(): List<JsonObject> =
+    this?.filterIsInstance<JsonObject>().orEmpty()
+
+private fun JsonObject.hasAppTag(): Boolean =
+    isManagedSingBoxTag((this["tag"] as? JsonPrimitive)?.contentOrNull.orEmpty())
+
+private fun compileExperimental(appState: AppState): JsonObject? {
+    // The FakeIP store only matters while the managed FakeIP server is compiled.
+    val storeFakeIp = appState.storeFakeIp && appState.effectiveFakeIpEnabled
+    // ROOT can restart independently of the UI; retain the last API-selected mode.
+    if (!appState.runMode.isRootRunMode() && !storeFakeIp && !appState.storeDns) return null
+    return buildJsonObject {
+        putJsonObject("cache_file") {
+            put("enabled", true)
+            if (storeFakeIp) put("store_fakeip", true)
+            if (appState.storeDns) put("store_dns", true)
+        }
+    }
+}
+
+private val RouteRejectMethods = setOf("default", "drop", "reply")

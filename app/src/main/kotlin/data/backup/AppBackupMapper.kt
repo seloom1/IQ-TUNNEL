@@ -1,0 +1,580 @@
+// Copyright 2026, AsteriskBOX contributors
+// SPDX-License-Identifier: GPL-3.0
+
+package data.backup
+
+import engine.singbox.config.DnsConfigurationMatchFields
+import engine.singbox.config.dnsConfigurationEntryTag
+
+import app.withCompatibleProxyAppListMode
+import app.AppState
+import app.withNormalizedConnectionTestSettings
+import features.resources.withInitializedBundledRuleSets
+import app.ServiceControlSchedule
+import app.ServiceControlKeyguard
+import features.settings.servicecontrol.normalizeServiceControlSettings
+import app.ServiceControlSettings
+import app.ServiceControlWifi
+import app.ServiceControlWifiRule
+import app.CustomResourceFileState
+import app.OutboundGroupState
+import app.OutboundGroupUpdateStatus
+import app.OutboundState
+import app.SubscriptionInfo
+import app.SingBoxDnsRuleState
+import app.SingBoxDnsRuleTypeLogical
+import app.SingBoxEndpointState
+import app.SingBoxRouteRuleState
+import app.SingBoxSelectorState
+import app.isManagedSingBoxTag
+import app.selectableManagedOutbounds
+import app.withCanonicalManagedTagReferences
+import app.modes.RunModeVpnService
+
+internal fun AppState.toAppBackupFile(
+    createdAtMillis: Long,
+    appVersionName: String,
+    appVersionCode: Int,
+): AppBackupFile =
+    AppBackupFile(
+        format = AppBackupFormat,
+        version = CurrentAppBackupVersion,
+        createdAtMillis = createdAtMillis,
+        appVersionName = appVersionName,
+        appVersionCode = appVersionCode,
+        data =
+            AppBackupData(
+                settings = toBackupSettings(),
+                outboundGroups = outboundGroups.map(OutboundGroupState::toBackup),
+                outbounds = outbounds.map(OutboundState::toBackup),
+                endpoints = endpoints.map(SingBoxEndpointState::toBackup),
+                selectors = selectors.map(SingBoxSelectorState::toBackup),
+                routeRules = routeRules,
+                dnsServers = dnsServers,
+                dnsRules = dnsRules,
+                customResourceFiles = customResourceFiles.map(CustomResourceFileState::toBackup),
+                bundledRuleSetsInitialized = bundledRuleSetsInitialized,
+                proxyAppListSelectedApps = proxyAppListSelectedApps,
+            ),
+    )
+
+internal fun AppBackupFile.toRestorePreview(): AppBackupRestorePreview {
+    val migrated = migrateAppBackup()
+    migrated.data.validateForRestore()
+    val restoredState = migrated.data.toAppState()
+    return AppBackupRestorePreview(
+        backup = migrated,
+        restoredState = restoredState,
+        warnings = restoredState.restoreWarnings(),
+    )
+}
+
+private fun AppState.toBackupSettings(): AppBackupSettings =
+    AppBackupSettings(
+        colorMode = colorMode,
+        languageMode = languageMode,
+        seedIndex = seedIndex,
+        hideRecentTasks = hideRecentTasks,
+        allowScreenshots = allowScreenshots,
+        hideLauncherIcon = hideLauncherIcon,
+        autoHideNavigationBar = autoHideNavigationBar,
+        outboundListLayout = outboundListLayout,
+        outboundListSort = outboundListSort,
+        selectorSelections = selectorSelections,
+        routeAutoDetectInterface = routeAutoDetectInterface,
+        routeOverrideAndroidVpn = routeOverrideAndroidVpn,
+        routeDefaultNetworkStrategy = routeDefaultNetworkStrategy,
+        routeDefaultNetworkTypes = routeDefaultNetworkTypes,
+        routeDefaultFallbackNetworkTypes = routeDefaultFallbackNetworkTypes,
+        routeDefaultFallbackDelay = routeDefaultFallbackDelay,
+        routeFindProcess = routeFindProcess,
+        routeFinal = routeFinal,
+        singBoxMode = singBoxMode,
+        singBoxProxyLayout = singBoxProxyLayout,
+        singBoxProxySort = singBoxProxySort,
+        singBoxControlPort = singBoxControlPort,
+        singBoxControlSecret = singBoxControlSecret,
+        enableLocalDns = enableLocalDns,
+        localProxyPort = localProxyPort,
+        enableDynamicLocalProxyPort = enableDynamicLocalProxyPort,
+        localProxyListenAllInterfaces = localProxyListenAllInterfaces,
+        localProxyUsername = localProxyUsername,
+        localProxyPassword = localProxyPassword,
+        enableVpnAppendHttpProxy = enableVpnAppendHttpProxy,
+        enableVpnHevTun = enableVpnHevTun,
+        tunMtu = tunMtu,
+        tunVpnDns = tunVpnDns,
+        tunIpv4Cidr = tunIpv4Cidr,
+        tunIpv6Cidr = tunIpv6Cidr,
+        enableConfigOverrideScript = enableConfigOverrideScript,
+        configOverrideScript = configOverrideScript,
+        coreLogLevel = coreLogLevel,
+        enableTrafficStatsNotification = enableTrafficStatsNotification,
+        enableBroadcastControl = enableBroadcastControl,
+        enableResourceAutoUpdate = enableResourceAutoUpdate,
+        resourceAutoUpdateInterval = resourceAutoUpdateInterval,
+        resourceFileSource = resourceFileSource,
+        customResourceFileGeositeCategoryAdsAllUrl = customResourceFileGeositeCategoryAdsAllUrl,
+        customResourceFileGeositeGoogleUrl = customResourceFileGeositeGoogleUrl,
+        customResourceFileGeositeCnUrl = customResourceFileGeositeCnUrl,
+        customResourceFileGeoipCnUrl = customResourceFileGeoipCnUrl,
+        customResourceFileDirectCidrIpv4Url = customResourceFileDirectCidrIpv4Url,
+        customResourceFileDirectCidrIpv6Url = customResourceFileDirectCidrIpv6Url,
+        enableSniffer = enableSniffer,
+        snifferProtocols = snifferProtocols,
+        snifferTimeout = snifferTimeout,
+        enableIpv6 = enableIpv6,
+        enableIpv6Prefer = enableIpv6Prefer,
+        enableFakeIp = enableFakeIp,
+        dnsFakeIpRange = dnsFakeIpRange,
+        storeFakeIp = storeFakeIp,
+        dnsFinal = dnsFinal,
+        routeDefaultDomainResolver = routeDefaultDomainResolver,
+        dnsCacheCapacity = dnsCacheCapacity,
+        dnsOptimisticCache = dnsOptimisticCache,
+        dnsDisableCache = dnsDisableCache,
+        dnsDisableExpire = dnsDisableExpire,
+        dnsTimeout = dnsTimeout,
+        transparentProxyPort = transparentProxyPort,
+        ebpfLocalDataPlane = ebpfLocalDataPlane,
+        ebpfSharedDataPlane = ebpfSharedDataPlane,
+        ebpfLocalDnsMode = ebpfLocalDnsMode,
+        ebpfSharedDnsMode = ebpfSharedDnsMode,
+        enableRootEbpfDirectCidrBypass = enableRootEbpfDirectCidrBypass,
+        enableRootEbpfPrivateAddressBypass = enableRootEbpfPrivateAddressBypass,
+        tunBypassRuleSetTags = tunBypassRuleSetTags,
+        enableRootIpv6Disabler = enableRootIpv6Disabler,
+        socks5ProxyPort = socks5ProxyPort,
+        bpf2SocksBridgePort = bpf2SocksBridgePort,
+        externalInterfaces = externalInterfaces,
+        tunSharedNetworkInterfaces = tunSharedNetworkInterfaces,
+        ignoredInterfaces = ignoredInterfaces,
+        serviceControl = serviceControl.toBackup(),
+        privateAddressCidrs = privateAddressCidrs,
+        proxyAppListMode = proxyAppListMode,
+        connectionTestUrl = connectionTestUrl,
+        connectionTestConcurrent = connectionTestConcurrent,
+        connectionTestTimeoutMillis = connectionTestTimeoutMillis,
+        connectionTestUnifiedDelay = connectionTestUnifiedDelay,
+        connectionTestIgnoreHandshakeTime = connectionTestIgnoreHandshakeTime,
+    )
+
+private fun ServiceControlSettings.toBackup(): AppBackupServiceControl =
+    AppBackupServiceControl(
+        enabled = enabled,
+        keyguard = AppBackupServiceControlKeyguard(
+            enabled = keyguard.enabled,
+            lockStart = keyguard.lockStart,
+            lockStop = keyguard.lockStop,
+            unlockStart = keyguard.unlockStart,
+            unlockStop = keyguard.unlockStop,
+        ),
+        schedule = AppBackupServiceControlSchedule(
+            enabled = schedule.enabled,
+            startCron = schedule.startCron,
+            stopCron = schedule.stopCron,
+        ),
+        wifi = AppBackupServiceControlWifi(
+            enabled = wifi.enabled,
+            connectStart = wifi.connectStart.toBackup(),
+            connectStop = wifi.connectStop.toBackup(),
+            disconnectStart = wifi.disconnectStart.toBackup(),
+            disconnectStop = wifi.disconnectStop.toBackup(),
+        ),
+    )
+
+private fun ServiceControlWifiRule.toBackup(): AppBackupServiceControlWifiRule =
+    AppBackupServiceControlWifiRule(enabled = enabled, ssids = ssids, bssids = bssids)
+
+private fun AppBackupServiceControl.toState(): ServiceControlSettings =
+    ServiceControlSettings(
+        enabled = enabled,
+        keyguard = ServiceControlKeyguard(
+            enabled = keyguard.enabled,
+            lockStart = keyguard.lockStart,
+            lockStop = keyguard.lockStop,
+            unlockStart = keyguard.unlockStart,
+            unlockStop = keyguard.unlockStop,
+        ),
+        schedule = ServiceControlSchedule(
+            enabled = schedule.enabled,
+            startCron = schedule.startCron,
+            stopCron = schedule.stopCron,
+        ),
+        wifi = ServiceControlWifi(
+            enabled = wifi.enabled,
+            connectStart = wifi.connectStart.toState(),
+            connectStop = wifi.connectStop.toState(),
+            disconnectStart = wifi.disconnectStart.toState(),
+            disconnectStop = wifi.disconnectStop.toState(),
+        ),
+    )
+
+private fun AppBackupServiceControlWifiRule.toState(): ServiceControlWifiRule =
+    ServiceControlWifiRule(enabled = enabled, ssids = ssids, bssids = bssids)
+
+private fun OutboundGroupState.toBackup(): AppBackupOutboundGroup =
+    AppBackupOutboundGroup(
+        id = id,
+        name = name,
+        url = url,
+        userAgent = userAgent,
+        detour = detour,
+        updateInterval = updateInterval,
+        hwid = hwid,
+        updateViaProxy = updateViaProxy,
+        ageSecretKey = ageSecretKey,
+        enabled = enabled,
+        strictImport = strictImport,
+        lastUpdateAttemptAtMillis = lastUpdateAttemptAtMillis,
+        lastUpdatedAtMillis = lastUpdatedAtMillis,
+        lastUpdateStatus = lastUpdateStatus.name,
+        lastUpdateImportedCount = lastUpdateImportedCount,
+        lastUpdateSkippedCount = lastUpdateSkippedCount,
+        lastUpdateDuplicateCount = lastUpdateDuplicateCount,
+        consecutiveUpdateFailures = consecutiveUpdateFailures,
+        lastUpdateErrorSummary = lastUpdateErrorSummary,
+        subscriptionEtag = subscriptionEtag,
+        subscriptionLastModified = subscriptionLastModified,
+        subscriptionUploadBytes = subscriptionInfo.uploadBytes,
+        subscriptionDownloadBytes = subscriptionInfo.downloadBytes,
+        subscriptionTotalBytes = subscriptionInfo.totalBytes,
+        subscriptionExpireAtSeconds = subscriptionInfo.expireAtSeconds,
+    )
+
+private fun OutboundState.toBackup(): AppBackupOutbound =
+    AppBackupOutbound(
+        id = id,
+        groupId = groupId,
+        remarks = remarks,
+        type = type,
+        json = json,
+    )
+
+private fun SingBoxEndpointState.toBackup(): AppBackupEndpoint =
+    AppBackupEndpoint(
+        id = id,
+        remarks = remarks,
+        type = type,
+        json = json,
+    )
+
+private fun SingBoxSelectorState.toBackup(): AppBackupSelector =
+    AppBackupSelector(
+        id = id,
+        remarks = remarks,
+        outbounds = outbounds,
+        default = default,
+        type = type,
+        url = url,
+        interval = interval,
+        tolerance = tolerance,
+        idleTimeout = idleTimeout,
+        interruptExistConnections = interruptExistConnections,
+    )
+
+private fun CustomResourceFileState.toBackup(): AppBackupCustomResourceFile =
+    AppBackupCustomResourceFile(
+        id = id,
+        name = name,
+        url = url,
+    )
+
+private fun AppBackupData.toAppState(): AppState {
+    val defaults = AppState()
+    val restoredOutboundGroups = outboundGroups.map(AppBackupOutboundGroup::toState)
+    val restoredOutbounds = outbounds.map(AppBackupOutbound::toState)
+    val restoredEndpoints = endpoints.map(AppBackupEndpoint::toState)
+    val restoredSelectors = selectors.map(AppBackupSelector::toState)
+    val restoredCustomResourceFiles = customResourceFiles.map(AppBackupCustomResourceFile::toState)
+
+    return defaults.copy(
+        colorMode = settings.colorMode,
+        languageMode = settings.languageMode,
+        seedIndex = settings.seedIndex,
+        hideRecentTasks = settings.hideRecentTasks,
+        allowScreenshots = settings.allowScreenshots,
+        hideLauncherIcon = settings.hideLauncherIcon,
+        autoHideNavigationBar = settings.autoHideNavigationBar,
+        outboundGroups = restoredOutboundGroups,
+        nextOutboundGroupId = nextId(
+            defaults.nextOutboundGroupId,
+            restoredOutboundGroups.map(OutboundGroupState::id),
+        ),
+        outbounds = restoredOutbounds,
+        nextOutboundId = nextId(defaults.nextOutboundId, restoredOutbounds.map(OutboundState::id)),
+        outboundListLayout = settings.outboundListLayout,
+        outboundListSort = settings.outboundListSort,
+        endpoints = restoredEndpoints,
+        nextEndpointId = nextId(defaults.nextEndpointId, restoredEndpoints.map(SingBoxEndpointState::id)),
+        selectors = restoredSelectors,
+        nextSelectorId = nextId(defaults.nextSelectorId, restoredSelectors.map(SingBoxSelectorState::id)),
+        selectorSelections = settings.selectorSelections,
+        routeAutoDetectInterface = settings.routeAutoDetectInterface,
+        routeOverrideAndroidVpn = settings.routeOverrideAndroidVpn,
+        routeDefaultNetworkStrategy = settings.routeDefaultNetworkStrategy,
+        routeDefaultNetworkTypes = settings.routeDefaultNetworkTypes,
+        routeDefaultFallbackNetworkTypes = settings.routeDefaultFallbackNetworkTypes,
+        routeDefaultFallbackDelay = settings.routeDefaultFallbackDelay,
+        routeFindProcess = settings.routeFindProcess,
+        routeFinal = settings.routeFinal,
+        routeRules = routeRules,
+        nextRouteRuleId = nextId(defaults.nextRouteRuleId, routeRules.map(SingBoxRouteRuleState::id)),
+        runMode = RunModeVpnService,
+        enableAppListEnhancement = false,
+        singBoxMode = settings.singBoxMode,
+        singBoxProxyLayout = settings.singBoxProxyLayout,
+        singBoxProxySort = settings.singBoxProxySort,
+        singBoxControlPort = settings.singBoxControlPort,
+        singBoxControlSecret = settings.singBoxControlSecret,
+        enableLocalDns = settings.enableLocalDns,
+        localProxyPort = settings.localProxyPort,
+        enableDynamicLocalProxyPort = settings.enableDynamicLocalProxyPort,
+        localProxyListenAllInterfaces = settings.localProxyListenAllInterfaces,
+        localProxyUsername = settings.localProxyUsername,
+        localProxyPassword = settings.localProxyPassword,
+        enableVpnAppendHttpProxy = settings.enableVpnAppendHttpProxy,
+        enableVpnHevTun = settings.enableVpnHevTun,
+        tunMtu = settings.tunMtu,
+        tunVpnDns = settings.tunVpnDns,
+        tunIpv4Cidr = settings.tunIpv4Cidr,
+        tunIpv6Cidr = settings.tunIpv6Cidr,
+        proxyRunning = false,
+        enableConfigOverrideScript = settings.enableConfigOverrideScript,
+        configOverrideScript = settings.configOverrideScript,
+        coreLogLevel = settings.coreLogLevel,
+        enableTrafficStatsNotification = settings.enableTrafficStatsNotification,
+        enableBroadcastControl = settings.enableBroadcastControl,
+        enableResourceAutoUpdate = settings.enableResourceAutoUpdate,
+        resourceAutoUpdateInterval = settings.resourceAutoUpdateInterval,
+        resourceFileSource = settings.resourceFileSource,
+        customResourceFileGeositeCategoryAdsAllUrl = settings.customResourceFileGeositeCategoryAdsAllUrl,
+        customResourceFileGeositeGoogleUrl = settings.customResourceFileGeositeGoogleUrl,
+        customResourceFileGeositeCnUrl = settings.customResourceFileGeositeCnUrl,
+        customResourceFileGeoipCnUrl = settings.customResourceFileGeoipCnUrl,
+        customResourceFileDirectCidrIpv4Url = settings.customResourceFileDirectCidrIpv4Url,
+        customResourceFileDirectCidrIpv6Url = settings.customResourceFileDirectCidrIpv6Url,
+        customResourceFiles = restoredCustomResourceFiles,
+        bundledRuleSetsInitialized = bundledRuleSetsInitialized,
+        nextCustomResourceFileId = nextId(
+            defaults.nextCustomResourceFileId,
+            restoredCustomResourceFiles.map(CustomResourceFileState::id),
+        ),
+        enableSniffer = settings.enableSniffer,
+        snifferProtocols = settings.snifferProtocols,
+        snifferTimeout = settings.snifferTimeout,
+        enableIpv6 = settings.enableIpv6,
+        enableIpv6Prefer = settings.enableIpv6Prefer,
+        enableFakeIp = settings.enableFakeIp,
+        dnsFakeIpRange = settings.dnsFakeIpRange,
+        storeFakeIp = settings.storeFakeIp,
+        dnsFinal = settings.dnsFinal,
+        routeDefaultDomainResolver = settings.routeDefaultDomainResolver,
+        dnsCacheCapacity = settings.dnsCacheCapacity,
+        dnsOptimisticCache = settings.dnsOptimisticCache,
+        dnsDisableCache = settings.dnsDisableCache,
+        dnsDisableExpire = settings.dnsDisableExpire,
+        dnsTimeout = settings.dnsTimeout,
+        dnsServers = dnsServers,
+        nextDnsServerId = nextId(defaults.nextDnsServerId, dnsServers.map { server -> server.id }),
+        dnsRules = dnsRules,
+        nextDnsRuleId = nextId(defaults.nextDnsRuleId, dnsRules.map { rule -> rule.id }),
+        transparentProxyPort = settings.transparentProxyPort,
+        enableRootBootScript = false,
+        enableRootEbpfRules = false,
+        ebpfLocalDataPlane = settings.ebpfLocalDataPlane,
+        ebpfSharedDataPlane = settings.ebpfSharedDataPlane,
+        ebpfLocalDnsMode = settings.ebpfLocalDnsMode,
+        ebpfSharedDnsMode = settings.ebpfSharedDnsMode,
+        enableRootEbpfDirectCidrBypass = settings.enableRootEbpfDirectCidrBypass,
+        enableRootEbpfPrivateAddressBypass = settings.enableRootEbpfPrivateAddressBypass,
+        tunBypassRuleSetTags = settings.tunBypassRuleSetTags
+            ?: settings.legacyEbpfBypassRuleSetTags,
+        enableRootIpv6Disabler = settings.enableRootIpv6Disabler,
+        socks5ProxyPort = settings.socks5ProxyPort,
+        bpf2SocksBridgePort = settings.bpf2SocksBridgePort,
+        externalInterfaces = settings.externalInterfaces,
+        tunSharedNetworkInterfaces = settings.tunSharedNetworkInterfaces
+            ?: settings.legacyEbpfSharedNetworkInterfaces,
+        ignoredInterfaces = settings.ignoredInterfaces,
+        serviceControl = normalizeServiceControlSettings(settings.serviceControl.toState()),
+        privateAddressCidrs = settings.privateAddressCidrs,
+        proxyAppListMode = settings.proxyAppListMode,
+        connectionTestUrl = settings.connectionTestUrl,
+        connectionTestConcurrent = settings.connectionTestConcurrent,
+        connectionTestTimeoutMillis = settings.connectionTestTimeoutMillis,
+        connectionTestUnifiedDelay = settings.connectionTestUnifiedDelay,
+        connectionTestIgnoreHandshakeTime = settings.connectionTestIgnoreHandshakeTime,
+        proxyAppListSelectedApps = proxyAppListSelectedApps,
+    ).withInitializedBundledRuleSets()
+        .withCanonicalManagedTagReferences()
+        .withCompatibleProxyAppListMode()
+        .withNormalizedConnectionTestSettings()
+}
+
+private fun AppBackupOutboundGroup.toState(): OutboundGroupState =
+    OutboundGroupState(
+        id = id,
+        name = name,
+        url = url,
+        userAgent = userAgent,
+        detour = detour,
+        updateInterval = updateInterval,
+        hwid = hwid,
+        updateViaProxy = updateViaProxy,
+        ageSecretKey = ageSecretKey,
+        enabled = enabled,
+        strictImport = strictImport,
+        lastUpdateAttemptAtMillis = lastUpdateAttemptAtMillis,
+        lastUpdatedAtMillis = lastUpdatedAtMillis,
+        lastUpdateStatus = OutboundGroupUpdateStatus.valueOf(lastUpdateStatus),
+        lastUpdateImportedCount = lastUpdateImportedCount,
+        lastUpdateSkippedCount = lastUpdateSkippedCount,
+        lastUpdateDuplicateCount = lastUpdateDuplicateCount,
+        consecutiveUpdateFailures = consecutiveUpdateFailures,
+        lastUpdateErrorSummary = lastUpdateErrorSummary,
+        subscriptionEtag = subscriptionEtag,
+        subscriptionLastModified = subscriptionLastModified,
+        subscriptionInfo = SubscriptionInfo(
+            uploadBytes = subscriptionUploadBytes.coerceAtLeast(0L),
+            downloadBytes = subscriptionDownloadBytes.coerceAtLeast(0L),
+            totalBytes = subscriptionTotalBytes.coerceAtLeast(0L),
+            expireAtSeconds = subscriptionExpireAtSeconds.coerceAtLeast(0L),
+        ),
+    )
+
+private fun AppBackupOutbound.toState(): OutboundState =
+    OutboundState(
+        id = id,
+        groupId = groupId,
+        remarks = remarks,
+        type = type,
+        json = json,
+    )
+
+private fun AppBackupEndpoint.toState(): SingBoxEndpointState =
+    SingBoxEndpointState(
+        id = id,
+        remarks = remarks,
+        type = type,
+        json = json,
+    )
+
+private fun AppBackupSelector.toState(): SingBoxSelectorState =
+    SingBoxSelectorState(
+        id = id,
+        remarks = remarks,
+        outbounds = outbounds,
+        default = default,
+        type = type,
+        url = url,
+        interval = interval,
+        tolerance = tolerance,
+        idleTimeout = idleTimeout,
+        interruptExistConnections = interruptExistConnections,
+    )
+
+private fun AppBackupCustomResourceFile.toState(): CustomResourceFileState =
+    CustomResourceFileState(
+        id = id,
+        name = name,
+        url = url,
+    )
+
+private fun AppState.restoreWarnings(): List<AppBackupWarning> {
+    val availableOutbounds = selectableManagedOutbounds(this).mapTo(mutableSetOf()) { choice -> choice.tag }
+    val outboundReferences = buildList {
+        outboundGroups.forEach { group -> add(group.detour) }
+        selectors.forEach { selector ->
+            addAll(selector.outbounds)
+            add(selector.default)
+        }
+        selectorSelections.forEach { (selector, outbound) ->
+            add(selector)
+            add(outbound)
+        }
+        add(routeFinal)
+        routeRules.forEach { rule -> addAll(rule.outboundReferences()) }
+        dnsServers.forEach { server -> add(server.detour) }
+    }
+    val missingOutboundCount = outboundReferences.countMissingManagedReferences(availableOutbounds)
+
+    val availableDnsServers = dnsServers.mapTo(mutableSetOf()) { server -> server.tag }
+        .apply { if (enableFakeIp) add(app.ManagedFakeIpDnsTag) }
+    val dnsReferences = buildList {
+        add(dnsFinal)
+        add(routeDefaultDomainResolver)
+        dnsServers.forEach { server -> add(server.domainResolver) }
+        dnsRules.forEach { rule -> addAll(rule.dnsServerReferences(includeAction = true)) }
+        routeRules.forEach { rule -> addAll(rule.dnsConfigurationReferences()) }
+    }
+    val missingDnsServerCount = dnsReferences.countMissingManagedReferences(availableDnsServers)
+
+    val availableEndpoints = endpoints.mapTo(mutableSetOf()) { endpoint -> endpoint.tag }
+    val endpointReferences = buildList {
+        dnsServers.forEach { server -> add(server.endpoint) }
+        routeRules.forEach { rule -> addAll(rule.preferredByEndpointReferences()) }
+    }
+    val missingEndpointCount = endpointReferences.countMissingManagedReferences(availableEndpoints)
+
+    return buildList {
+        if (missingOutboundCount > 0) {
+            add(AppBackupWarning.MissingOutboundReferences(missingOutboundCount))
+        }
+        if (missingDnsServerCount > 0) {
+            add(AppBackupWarning.MissingDnsServerReferences(missingDnsServerCount))
+        }
+        if (missingEndpointCount > 0) {
+            add(AppBackupWarning.MissingEndpointReferences(missingEndpointCount))
+        }
+    }
+}
+
+private fun SingBoxRouteRuleState.preferredByEndpointReferences(): List<String> =
+    buildList {
+        addAll(preferredBy)
+        logicalRules.forEach { rule -> addAll(rule.preferredByEndpointReferences()) }
+    }
+
+private fun SingBoxRouteRuleState.outboundReferences(): List<String> =
+    buildList {
+        add(outbound)
+        logicalRules.forEach { rule -> addAll(rule.outboundReferences()) }
+    }
+
+private fun SingBoxRouteRuleState.dnsConfigurationReferences(): List<String> =
+    if (type == app.SingBoxRouteRuleTypeLogical) {
+        logicalRules.flatMap { it.dnsConfigurationReferences() }
+    } else {
+        (dnsServerAddress + dnsSearchDomain).map(::dnsConfigurationEntryTag)
+    }
+
+private fun SingBoxDnsRuleState.dnsServerReferences(
+    includeAction: Boolean,
+): List<String> = buildList {
+    if (includeAction) {
+        when (action.trim()) {
+            "route", "evaluate" -> add(server)
+        }
+    }
+    if (type == SingBoxDnsRuleTypeLogical) {
+        logicalRules.forEach { rule ->
+            addAll(rule.dnsServerReferences(includeAction = false))
+        }
+    } else {
+        matches
+            .filter { match -> match.field == "preferred_by" }
+            .forEach { match -> addAll(match.values) }
+        matches.filter { it.field in DnsConfigurationMatchFields }
+            .forEach { match -> addAll(match.values.map(::dnsConfigurationEntryTag)) }
+    }
+}
+
+private fun Iterable<String>.countMissingManagedReferences(availableTags: Set<String>): Int =
+    count { reference ->
+        val normalized = reference.trim()
+        isManagedSingBoxTag(normalized) && normalized !in availableTags
+    }
+
+private fun nextId(defaultValue: Int, ids: List<Int>): Int =
+    maxOf(defaultValue, (ids.maxOrNull() ?: 0) + 1)

@@ -1,0 +1,117 @@
+// Copyright 2026, AsteriskBOX contributors
+// SPDX-License-Identifier: GPL-3.0
+
+package engine.singbox
+
+import features.resources.BundledRuleSet
+import app.SingBoxDnsRuleMatchState
+import app.SingBoxDnsRuleState
+import app.SingBoxDnsServerState
+import app.SingBoxRouteRuleActionReject
+import app.SingBoxRouteRuleState
+import app.managedBundledRuleSetTag
+import app.managedDnsServerTag
+import engine.singbox.config.APP_DIRECT_OUTBOUND
+import engine.singbox.config.APP_GLOBAL_SELECTOR
+
+val DefaultSingBoxDnsFinal = managedDnsServerTag(2, "proxy")
+val DefaultSingBoxRouteDefaultDomainResolver = managedDnsServerTag(1, "direct")
+const val DefaultSingBoxDnsCacheCapacity = ""
+const val DefaultSingBoxDnsTimeout = "10s"
+val DefaultSingBoxDnsServers = listOf(
+    SingBoxDnsServerState(
+        id = 1,
+        remarks = "direct",
+        type = "local",
+    ),
+    SingBoxDnsServerState(
+        id = 2,
+        remarks = "proxy",
+        type = "tls",
+        server = "8.8.8.8",
+        detour = APP_GLOBAL_SELECTOR,
+    ),
+)
+val DefaultSingBoxDnsRules = listOf(
+    SingBoxDnsRuleState(
+        id = 1,
+        remarks = "ad_blocker",
+        enabled = false,
+        matches = listOf(
+            SingBoxDnsRuleMatchState(
+                field = "rule_set",
+                values = listOf(
+                    managedBundledRuleSetTag(BundledRuleSet.GeositeCategoryAdsAll),
+                ),
+            ),
+        ),
+        action = SingBoxRouteRuleActionReject,
+    ),
+    SingBoxDnsRuleState(
+        id = 2,
+        remarks = "google",
+        matches = listOf(
+            SingBoxDnsRuleMatchState(
+                field = "rule_set",
+                values = listOf(managedBundledRuleSetTag(BundledRuleSet.GeositeGoogle)),
+            ),
+        ),
+        server = managedDnsServerTag(2, "proxy"),
+    ),
+    SingBoxDnsRuleState(
+        id = 3,
+        remarks = "china_site",
+        matches = listOf(
+            SingBoxDnsRuleMatchState(
+                field = "rule_set",
+                values = listOf(managedBundledRuleSetTag(BundledRuleSet.GeositeCn)),
+            ),
+        ),
+        server = managedDnsServerTag(1, "direct"),
+    ),
+)
+val DefaultSingBoxRouteRules = listOf(
+    SingBoxRouteRuleState(
+        id = 1,
+        remarks = "private_ip",
+        ipIsPrivate = true,
+        outbound = APP_DIRECT_OUTBOUND,
+    ),
+    SingBoxRouteRuleState(
+        id = 2,
+        remarks = "block_udp_443",
+        network = listOf("udp"),
+        port = listOf("443"),
+        action = SingBoxRouteRuleActionReject,
+    ),
+    SingBoxRouteRuleState(
+        id = 3,
+        remarks = "google",
+        ruleSet = listOf(managedBundledRuleSetTag(BundledRuleSet.GeositeGoogle)),
+        outbound = APP_GLOBAL_SELECTOR,
+    ),
+    SingBoxRouteRuleState(
+        id = 4,
+        remarks = "china_ip_site",
+        ruleSet = listOf(
+            managedBundledRuleSetTag(BundledRuleSet.GeositeCn),
+            managedBundledRuleSetTag(BundledRuleSet.GeoipCn),
+        ),
+        outbound = APP_DIRECT_OUTBOUND,
+    ),
+)
+
+val SingBoxSnifferProtocols = listOf(
+    "http",
+    "tls",
+    "quic",
+    "stun",
+    "dns",
+    "bittorrent",
+    "dtls",
+    "ssh",
+    "rdp",
+    "ntp",
+)
+val DefaultSingBoxSnifferProtocols = listOf("http", "tls", "quic")
+const val DefaultSingBoxSnifferTimeout = "300ms"

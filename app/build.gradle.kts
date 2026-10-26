@@ -1,0 +1,206 @@
+// Copyright 2026, AsteriskBOX contributors
+// SPDX-License-Identifier: GPL-3.0
+
+@file:Suppress("UnstableApiUsage")
+
+import com.android.build.api.variant.HasHostTestsBuilder
+import com.android.build.api.variant.HostTestBuilder
+
+plugins {
+    alias(libs.plugins.android.application)
+    alias(libs.plugins.compose.compiler)
+    alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.ksp)
+}
+
+val generatedSrcDir: Provider<Directory> = layout.buildDirectory.dir("generated/projectInfo")
+val isBuildingAppBundle = gradle.startParameter.taskNames.any { requestedTask ->
+    requestedTask.substringAfterLast(':').startsWith("bundle", ignoreCase = true)
+}
+
+android {
+    namespace = "app"
+    compileSdk {
+        version = release(ProjectConfig.TARGET_SDK) {
+            minorApiLevel = ProjectConfig.TARGET_SDK_MINOR
+        }
+    }
+
+    // Built-in Kotlin inherits this JVM target.
+    compileOptions {
+        sourceCompatibility = JavaVersion.toVersion(ProjectConfig.JVM_VERSION)
+        targetCompatibility = JavaVersion.toVersion(ProjectConfig.JVM_VERSION)
+    }
+
+    defaultConfig {
+        applicationId = ProjectConfig.PACKAGE_NAME
+        minSdk = ProjectConfig.MIN_SDK
+        targetSdk = ProjectConfig.TARGET_SDK
+        versionCode = getGitVersionCode()
+        versionName = ProjectConfig.VERSION_NAME
+    }
+
+    androidResources {
+        localeFilters += listOf("en", "zh-rCN", "ar")
+    }
+
+    bundle {
+        language {
+            enableSplit = false
+        }
+    }
+
+    buildFeatures {
+        compose = true
+    }
+
+    splits {
+        abi {
+            isEnable = !isBuildingAppBundle
+            reset()
+            include(*ProjectConfig.SUPPORTED_ANDROID_ABIS.toTypedArray())
+            isUniversalApk = !isBuildingAppBundle
+        }
+    }
+
+    buildTypes {
+        debug {
+            isMinifyEnabled = false
+        }
+
+        release {
+            isDebuggable = false
+            isJniDebuggable = false
+            isPseudoLocalesEnabled = false
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
+        }
+    }
+
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+            keepDebugSymbols += "**/libsing-box.so"
+        }
+        resources {
+            excludes += setOf(
+                "DebugProbesKt.bin",
+                "META-INF/*.kotlin_module",
+                "META-INF/AL2.0",
+                "META-INF/LGPL2.1",
+                "META-INF/LICENSE",
+                "META-INF/LICENSE.md",
+                "META-INF/LICENSE.txt",
+                "META-INF/NOTICE",
+                "META-INF/NOTICE.md",
+                "META-INF/NOTICE.txt",
+                "META-INF/versions/**",
+            )
+        }
+    }
+
+    lint {
+        disable += setOf(
+            "ChromeOsAbiSupport",
+            "IconLauncherShape",
+        )
+    }
+}
+
+tasks.named("preBuild") {
+    dependsOn(rootProject.tasks.named("updateResourceFileAssets"))
+}
+
+dependencies {
+    implementation(libs.compose.ui)
+    implementation(libs.haze)
+    implementation(libs.haze.blur)
+    implementation(libs.compose.foundation)
+    implementation(libs.compose.material.icons.extended)
+    implementation(libs.compose.material3)
+    implementation(libs.androidx.navigation3.runtime)
+    implementation(libs.androidx.navigation3.ui)
+    implementation(libs.androidx.lifecycle.runtime.compose)
+    implementation(libs.androidx.navigationevent)
+    implementation(libs.androidx.room.runtime)
+    implementation(libs.androidx.work.runtime)
+    implementation(libs.androidx.activity.compose)
+    implementation(libs.coil)
+    implementation(libs.coil.compose)
+    implementation(libs.dexlib2)
+    implementation(dependencies.project(":asteriskd"))
+    implementation(dependencies.project(":enhance"))
+    implementation(dependencies.project(":bpfmatcher"))
+    implementation(dependencies.project(":bpf2socks"))
+    implementation(dependencies.project(":hevtun"))
+    //noinspection UseTomlInstead
+    implementation("com.github.asterisk4magisk:libbox:${ProjectConfig.ANDROID_LIB_BOX_LITE_VERSION}@aar")
+    implementation(libs.ktor.http)
+    implementation(libs.kage)
+    implementation(libs.kotlinx.serialization.json)
+    implementation(libs.libsu.core)
+    implementation(libs.material.kolor)
+    implementation(libs.reorderable)
+    implementation(libs.quickjs.kt.android)
+    implementation(libs.sora.editor)
+    implementation(libs.snakeyaml.engine) {
+        exclude(group = "org.junit.jupiter", module = "junit-jupiter-api")
+    }
+    implementation(libs.zxing.android.embedded)
+    ksp(libs.androidx.room.compiler)
+}
+
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
+val generateProjectInfo = tasks.register<GenerateProjectInfoTask>("generateProjectInfo") {
+    description = "Generate ProjectInfo object for the app"
+    packageName.set("app")
+    projectName.set(ProjectConfig.PROJECT_NAME)
+    versionName.set(ProjectConfig.VERSION_NAME)
+    versionCode.set(getGitVersionCode())
+    androidLibBoxLiteVersion.set(ProjectConfig.ANDROID_LIB_BOX_LITE_VERSION)
+    hevSocks5TunnelVersion.set(ProjectConfig.HEV_SOCKS5_TUNNEL_VERSION)
+    outputDirectory.set(generatedSrcDir.map { it.dir("kotlin") })
+}
+
+androidComponents {
+    beforeVariants(selector().all()) { variant ->
+        variant.enableAndroidTest = false
+        (variant as? HasHostTestsBuilder)
+            ?.hostTests
+            ?.get(HostTestBuilder.UNIT_TEST_TYPE)
+            ?.enable = false
+    }
+
+    onVariants { variant ->
+        variant.sources.kotlin?.addGeneratedSourceDirectory(generateProjectInfo) { task ->
+            task.outputDirectory
+        }
+        variant.sources.assets?.addStaticSourceDirectory("build/generated/resourceFileAssets")
+    }
+}
+
+tasks.matching { it.name.startsWith("ksp") }.configureEach {
+    dependsOn(generateProjectInfo)
+}
+
+val aboutLibrariesJsonFile = layout.projectDirectory.file("src/main/assets/aboutlibraries.json")
+
+val updateAboutLibrariesJson = tasks.register<GenerateAboutLibrariesJsonTask>("updateAboutLibrariesJson") {
+    group = "documentation"
+    description = "Update files/aboutlibraries.json from current app dependency metadata."
+    outputFile.set(aboutLibrariesJsonFile)
+}
+
+tasks.matching { it.name.startsWith("merge") && it.name.endsWith("Assets") }.configureEach {
+    mustRunAfter(updateAboutLibrariesJson)
+    if (!aboutLibrariesJsonFile.asFile.exists()) {
+        dependsOn(updateAboutLibrariesJson)
+    }
+}

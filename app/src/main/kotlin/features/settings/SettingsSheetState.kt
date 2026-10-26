@@ -1,0 +1,132 @@
+// Copyright 2026, AsteriskBOX contributors
+// SPDX-License-Identifier: GPL-3.0
+
+package features.settings
+
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import app.AppState
+import engine.singbox.DefaultEbpfSharedDataPlane
+import engine.singbox.DefaultEbpfDnsMode
+import features.settings.sheets.sanitizeIgnoredInterfaceSelectors
+import features.settings.sheets.sanitizeExternalInterfaces
+import features.settings.sheets.sanitizePrivateAddressCidrs
+import features.settings.sheets.sanitizeTunBypassRuleSetTags
+import features.settings.sheets.sanitizeTunSharedNetworkInterfaces
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+
+internal class SettingsSheetState(
+    private val updateAppState: ((AppState) -> AppState) -> Unit,
+) {
+    var showConnectionTestSettings by mutableStateOf(false)
+    var connectionTestSettingsDraft by mutableStateOf(ConnectionTestSettingsDraft())
+
+    fun openConnectionTestSettings(appState: AppState) {
+        connectionTestSettingsDraft = appState.toConnectionTestSettingsDraft()
+        showConnectionTestSettings = true
+    }
+
+    var showLocalProxySettings by mutableStateOf(false)
+    var localProxySettingsDraft by mutableStateOf(LocalProxySettingsDraft())
+
+    var showTunSettings by mutableStateOf(false)
+    var tunSettingsDraft by mutableStateOf(TunSettingsDraft())
+
+    var showSnifferSettings by mutableStateOf(false)
+    var snifferSettingsDraft by mutableStateOf(SnifferSettingsDraft())
+
+    var showExternalInterfaces by mutableStateOf(false)
+    var externalInterfacesDraft by mutableStateOf(emptyList<String>())
+
+    var showIgnoredInterfaces by mutableStateOf(false)
+    var ignoredInterfacesDraft by mutableStateOf(emptyList<String>())
+
+    var showServiceControl by mutableStateOf(false)
+    var serviceControlDraft by mutableStateOf(app.ServiceControlSettings())
+
+    var showPrivateAddresses by mutableStateOf(false)
+    var privateAddressCidrsDraft by mutableStateOf(emptyList<String>())
+
+    var showTunSharedNetwork by mutableStateOf(false)
+    var tunSharedNetworkInterfacesDraft by mutableStateOf(emptyList<String>())
+    var ebpfSharedDataPlaneDraft by mutableStateOf(DefaultEbpfSharedDataPlane)
+    var ebpfSharedDnsModeDraft by mutableStateOf(DefaultEbpfDnsMode)
+
+    var showTunBypassRuleSets by mutableStateOf(false)
+    var tunBypassRuleSetTagsDraft by mutableStateOf(emptyList<String>())
+
+    var showNetworkQualityTest by mutableStateOf(false)
+
+    fun openLocalProxySettings(appState: AppState) {
+        localProxySettingsDraft = appState.toLocalProxySettingsDraft()
+        showLocalProxySettings = true
+    }
+
+    fun openTunSettings(appState: AppState) {
+        tunSettingsDraft = appState.toTunSettingsDraft()
+        showTunSettings = true
+    }
+
+    fun openSnifferSettings(appState: AppState) {
+        snifferSettingsDraft = appState.toSnifferSettingsDraft()
+        showSnifferSettings = true
+    }
+
+    fun openExternalInterfaces(appState: AppState) {
+        val sanitizedInterfaces = appState.externalInterfaces.sanitizeExternalInterfaces()
+        externalInterfacesDraft = sanitizedInterfaces
+        if (sanitizedInterfaces != appState.externalInterfaces) {
+            updateAppState { state -> state.copy(externalInterfaces = sanitizedInterfaces) }
+        }
+        showExternalInterfaces = true
+    }
+
+    fun openIgnoredInterfaces(appState: AppState) {
+        ignoredInterfacesDraft = appState.ignoredInterfaces.sanitizeIgnoredInterfaceSelectors()
+        showIgnoredInterfaces = true
+    }
+
+    fun openServiceControl(appState: AppState) {
+        serviceControlDraft = appState.serviceControl
+        showServiceControl = true
+    }
+
+    fun closeIgnoredInterfaces() {
+        showIgnoredInterfaces = false
+    }
+
+    fun openPrivateAddresses(appState: AppState) {
+        val sanitizedCidrs = appState.privateAddressCidrs.sanitizePrivateAddressCidrs()
+        privateAddressCidrsDraft = sanitizedCidrs
+        if (sanitizedCidrs != appState.privateAddressCidrs) {
+            updateAppState { state -> state.copy(privateAddressCidrs = sanitizedCidrs) }
+        }
+        showPrivateAddresses = true
+    }
+
+    fun openTunSharedNetwork(appState: AppState) {
+        ebpfSharedDataPlaneDraft = appState.ebpfSharedDataPlane
+        ebpfSharedDnsModeDraft = appState.ebpfSharedDnsMode
+        tunSharedNetworkInterfacesDraft =
+            appState.tunSharedNetworkInterfaces.sanitizeTunSharedNetworkInterfaces()
+        showTunSharedNetwork = true
+    }
+
+    fun openTunBypassRuleSets(appState: AppState) {
+        tunBypassRuleSetTagsDraft = sanitizeTunBypassRuleSetTags(appState.tunBypassRuleSetTags)
+        showTunBypassRuleSets = true
+    }
+
+    fun openNetworkQualityTest() {
+        showNetworkQualityTest = true
+    }
+}
+
+@Composable
+internal fun rememberSettingsSheetState(
+    updateAppState: ((AppState) -> AppState) -> Unit,
+): SettingsSheetState {
+    return remember(updateAppState) { SettingsSheetState(updateAppState) }
+}

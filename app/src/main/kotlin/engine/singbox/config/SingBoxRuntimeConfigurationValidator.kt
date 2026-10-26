@@ -1,0 +1,23 @@
+// Copyright 2026, AsteriskBOX contributors
+// SPDX-License-Identifier: GPL-3.0
+
+package engine.singbox.config
+
+import android.content.Context
+import app.AppState
+import java.io.File
+
+internal fun validateSingBoxRuntimeConfiguration(
+    context: Context,
+    state: AppState,
+    customResourceFileOverrides: Map<Int, File> = emptyMap(),
+) {
+    // Validate editable settings independently of the script used for runtime configs and previews.
+    val generated = SingBoxConfigCompiler.generate(
+        context = context,
+        appState = state,
+        exposePorts = false,
+        customResourceFileOverrides = customResourceFileOverrides,
+    )
+    SingBoxConfigChecker.check(encodeSingBoxJson(generated))
+}
